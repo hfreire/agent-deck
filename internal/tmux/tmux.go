@@ -1575,7 +1575,7 @@ func NewSession(name, workDir string) *Session {
 		startupAt:             time.Now(),
 		lastStableStatus:      "waiting",
 		toolDetectExpiry:      30 * time.Second, // Re-detect tool every 30 seconds
-		injectStatusLine:      true,             // Default: inject status bar
+		injectStatusLine:      getDefaultInjectStatusLine(),             // Default: inject status bar
 		mouse:                 true,             // Default: mouse on (#730 opt-out)
 		terminalChromeEnabled: false,            // Default: opt-in (set true via [terminal].iterm_badge)
 		// stateTracker and promptDetector will be created lazily on first status check
@@ -1598,7 +1598,7 @@ func ReconnectSession(tmuxName, displayName, workDir, command string) *Session {
 		startupAt:             time.Time{},
 		lastStableStatus:      "waiting",
 		toolDetectExpiry:      30 * time.Second,
-		injectStatusLine:      true,  // Default: inject status bar
+		injectStatusLine:      getDefaultInjectStatusLine(),  // Default: inject status bar
 		mouse:                 true,  // Default: mouse on (#730 opt-out)
 		terminalChromeEnabled: false, // Default: opt-in (set true via [terminal].iterm_badge)
 		configured:            false, // Will be set to true after configuration
@@ -1668,7 +1668,7 @@ func ReconnectSessionLazy(tmuxName, displayName, workDir, command string, previo
 		startupAt:             time.Time{},
 		lastStableStatus:      "waiting",
 		toolDetectExpiry:      30 * time.Second,
-		injectStatusLine:      true,  // Default: inject status bar
+		injectStatusLine:      getDefaultInjectStatusLine(),  // Default: inject status bar
 		mouse:                 true,  // Default: mouse on (#730 opt-out)
 		terminalChromeEnabled: false, // Default: opt-in (set true via [terminal].iterm_badge)
 		configured:            false, // Explicitly mark as not configured

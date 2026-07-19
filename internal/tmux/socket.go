@@ -103,6 +103,33 @@ func DefaultSocketName() string {
 	return defaultSocketName
 }
 
+// Process-wide default for status-bar injection, seeded from
+// [tmux].inject_status_line at startup. ReconnectSession* build Session objects
+// for existing sessions (watcher/poll path) and cannot see per-session config,
+// so without this they hardcoded injection ON and re-emitted `status on` every
+// poll — defeating `inject_status_line = false`. Defaults to true so behavior is
+// unchanged until main.go seeds it.
+var (
+	defaultInjectStatusLine   = true
+	defaultInjectStatusLineMu sync.RWMutex
+)
+
+// SetDefaultInjectStatusLine seeds the process-wide status-bar injection
+// default. Called once from main.go after config load, alongside
+// SetDefaultSocketName.
+func SetDefaultInjectStatusLine(v bool) {
+	defaultInjectStatusLineMu.Lock()
+	defer defaultInjectStatusLineMu.Unlock()
+	defaultInjectStatusLine = v
+}
+
+// getDefaultInjectStatusLine returns the process-wide injection default.
+func getDefaultInjectStatusLine() bool {
+	defaultInjectStatusLineMu.RLock()
+	defer defaultInjectStatusLineMu.RUnlock()
+	return defaultInjectStatusLine
+}
+
 // tmuxFieldSep delimits the fields of the `-F` format strings that agent-deck
 // both emits and parses (the session / pane / client probes that feed status
 // detection). It MUST be a printable ASCII byte, and historically was a TAB —

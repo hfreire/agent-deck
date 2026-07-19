@@ -231,6 +231,10 @@ func main() {
 	// calls use Instance.TmuxSocketName directly — this default is only
 	// the installation-wide fallback for callers without a session handle.
 	tmux.SetDefaultSocketName(session.GetTmuxSettings().GetSocketName())
+	// Seed the status-bar injection default so the watcher/reconnect path (which
+	// builds Session objects without per-session config) honors
+	// [tmux].inject_status_line instead of always re-injecting `status on`.
+	tmux.SetDefaultInjectStatusLine(session.GetTmuxSettings().GetInjectStatusLine())
 
 	// Nudge macOS users whose tmux predates the upstream fix for the
 	// control-mode NULL-deref (tmux #4980, issue #737). Once per process,
