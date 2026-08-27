@@ -37,7 +37,7 @@ func TestRenderQuotaBarFullWidth(t *testing.T) {
 	now := quotaNow()
 	got := stripAnsi(renderQuotaBar([]quota.Snapshot{claudeSnapshot(now), codexSnapshot(now)}, 200, now))
 
-	for _, want := range []string{"17% 3h 36m", "43% 4d 13h", "0% Fable", "0% 4h 59m", "6% 5d 20h"} {
+	for _, want := range []string{"QUOTA", "[CLAUDE]", "17% 3h 36m", "43% 4d 13h", "0% Fable", "[CODEX]", "0% 4h 59m", "6% 5d 20h"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("bar %q is missing %q", got, want)
 		}
@@ -58,9 +58,11 @@ func TestRenderQuotaBarDegradesWithWidth(t *testing.T) {
 		wantAbsent []string
 		wantPresen []string
 	}{
-		{width: 70, wantAbsent: []string{"Fable"}, wantPresen: []string{"17%", "43%"}},
-		{width: 46, wantAbsent: []string{"Fable", "3h 36m"}, wantPresen: []string{"17%", "43%"}},
-		{width: 30, wantAbsent: []string{"43%", "6%"}, wantPresen: []string{"17%", "0%"}},
+		{width: 85, wantAbsent: []string{"Fable"}, wantPresen: []string{"17% 3h 36m", "43%"}},
+		{width: 70, wantAbsent: []string{"Fable", "3h 36m"}, wantPresen: []string{"17%", "43%"}},
+		// The meter is decoration; the weekly number outranks it.
+		{width: 46, wantAbsent: []string{"░"}, wantPresen: []string{"QUOTA", "17%", "43%"}},
+		{width: 30, wantAbsent: []string{"QUOTA", "43%", "6%"}, wantPresen: []string{"[CLAUDE]", "17%", "0%"}},
 	}
 	for _, tc := range tests {
 		got := stripAnsi(renderQuotaBar(snaps, tc.width, now))
@@ -91,7 +93,7 @@ func TestRenderQuotaBarSkipsProvidersWithoutWindows(t *testing.T) {
 	now := quotaNow()
 	broken := quota.Snapshot{Provider: quota.ProviderGemini, Err: "network down", UpdatedAt: now}
 	got := stripAnsi(renderQuotaBar([]quota.Snapshot{claudeSnapshot(now), broken}, 200, now))
-	if strings.Contains(got, quotaGlyph(quota.ProviderGemini)) {
+	if strings.Contains(got, quotaLabel(quota.ProviderGemini)) {
 		t.Fatalf("bar %q should omit a provider with no numbers", got)
 	}
 }
@@ -99,6 +101,42 @@ func TestRenderQuotaBarSkipsProvidersWithoutWindows(t *testing.T) {
 func TestRenderQuotaBarEmptyInput(t *testing.T) {
 	if got := renderQuotaBar(nil, 200, quotaNow()); got != "" {
 		t.Fatalf("bar = %q, want empty", got)
+	}
+}
+
+func TestQuotaLabel(t *testing.T) {
+	tests := map[string]string{
+		quota.ProviderClaude: "[CLAUDE]",
+		quota.ProviderCodex:  "[CODEX]",
+		quota.ProviderGemini: "[GEMINI]",
+		"mystery":            "[MYSTERY]",
+	}
+	for provider, want := range tests {
+		if got := quotaLabel(provider); got != want {
+			t.Fatalf("quotaLabel(%q) = %q, want %q", provider, got, want)
+		}
+	}
+}
+
+// The block is a rule plus the data row; the rule must span the terminal so it
+// lines up with the help bar's own border.
+func TestHomeQuotaBarBlock(t *testing.T) {
+	now := quotaNow()
+	h := &Home{width: 60, quotaMode: session.QuotaBarAuto, quotaSnaps: []quota.Snapshot{claudeSnapshot(now)}}
+	lines := strings.Split(stripAnsi(h.quotaBarBlock()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("block = %q, want 2 lines", lines)
+	}
+	if lines[0] != strings.Repeat("─", 60) {
+		t.Fatalf("top line = %q, want a full-width rule", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "QUOTA") {
+		t.Fatalf("data line = %q, want the QUOTA title first", lines[1])
+	}
+
+	off := &Home{width: 60, quotaMode: session.QuotaBarOff, quotaSnaps: []quota.Snapshot{claudeSnapshot(now)}}
+	if got := off.quotaBarBlock(); got != "" {
+		t.Fatalf("block = %q, want empty when disabled", got)
 	}
 }
 
@@ -171,8 +209,8 @@ func TestHomeQuotaBarLine(t *testing.T) {
 func TestHomeQuotaBarHeight(t *testing.T) {
 	now := quotaNow()
 	with := &Home{width: 200, quotaMode: session.QuotaBarAuto, quotaSnaps: []quota.Snapshot{claudeSnapshot(now)}}
-	if got := with.quotaBarHeight(); got != 1 {
-		t.Fatalf("quotaBarHeight() = %d, want 1", got)
+	if got := with.quotaBarHeight(); got != 2 {
+		t.Fatalf("quotaBarHeight() = %d, want 2", got)
 	}
 	without := &Home{width: 200, quotaMode: session.QuotaBarOff, quotaSnaps: []quota.Snapshot{claudeSnapshot(now)}}
 	if got := without.quotaBarHeight(); got != 0 {

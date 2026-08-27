@@ -17,6 +17,8 @@ const (
 	quotaMeterFull    = "█"
 	quotaMeterEmpty   = "░"
 	quotaSeparator    = "   "
+	quotaTitle        = "QUOTA"
+	quotaTitleGap     = "  "
 	quotaWindowJoiner = " · "
 	quotaStaleAfter   = 10 * time.Minute
 )
@@ -30,29 +32,22 @@ const (
 	quotaTierFull quotaTier = iota
 	quotaTierNoExtras
 	quotaTierNoResets
+	quotaTierNoMeter
 	quotaTierSessionOnly
-	quotaTierPercentOnly
+	quotaTierNoTitle
 )
 
 var quotaTiers = []quotaTier{
 	quotaTierFull,
 	quotaTierNoExtras,
 	quotaTierNoResets,
+	quotaTierNoMeter,
 	quotaTierSessionOnly,
-	quotaTierPercentOnly,
+	quotaTierNoTitle,
 }
 
-func quotaGlyph(provider string) string {
-	switch provider {
-	case quota.ProviderClaude:
-		return "✳"
-	case quota.ProviderCodex:
-		return "◉"
-	case quota.ProviderGemini:
-		return "✦"
-	default:
-		return "•"
-	}
+func quotaLabel(provider string) string {
+	return "[" + strings.ToUpper(provider) + "]"
 }
 
 func quotaMeter(percent float64) string {
@@ -131,9 +126,9 @@ func quotaAppendSegment(line *quotaLine, snap quota.Snapshot, tier quotaTier, no
 		primary = snap.Weekly
 	}
 
-	line.add(quotaGlyph(snap.Provider), dimStyle)
+	line.add(quotaLabel(snap.Provider), dimStyle)
 	line.add(" ", dimStyle)
-	if tier != quotaTierPercentOnly {
+	if tier < quotaTierNoMeter {
 		line.add(quotaMeter(primary.UsedPercent), style(primary.UsedPercent))
 		line.add(" ", dimStyle)
 	}
@@ -141,7 +136,7 @@ func quotaAppendSegment(line *quotaLine, snap quota.Snapshot, tier quotaTier, no
 	showReset := tier <= quotaTierNoExtras
 	line.add(quotaWindowText(*primary, showReset, now), style(primary.UsedPercent))
 
-	if tier > quotaTierNoResets || snap.Weekly == nil || snap.Weekly == primary {
+	if tier >= quotaTierSessionOnly || snap.Weekly == nil || snap.Weekly == primary {
 		return
 	}
 	line.add(quotaWindowJoiner, dimStyle)
@@ -173,6 +168,9 @@ func renderQuotaBar(snaps []quota.Snapshot, width int, now time.Time) string {
 	sepStyle := lipgloss.NewStyle().Foreground(ColorBorder)
 	for _, tier := range quotaTiers {
 		line := &quotaLine{}
+		if tier < quotaTierNoTitle {
+			line.add(quotaTitle+quotaTitleGap, lipgloss.NewStyle().Foreground(ColorTextDim).Bold(true))
+		}
 		for i, snap := range usable {
 			if i > 0 {
 				line.add(quotaSeparator, sepStyle)
@@ -213,9 +211,20 @@ func (h *Home) quotaBarLine() string {
 	return renderQuotaBar(h.quotaSnaps, h.width, time.Now())
 }
 
+// quotaBarBlock is the rule plus the data row, so the bar reads as its own
+// footer section rather than as an extra line of the session list.
+func (h *Home) quotaBarBlock() string {
+	line := h.quotaBarLine()
+	if line == "" {
+		return ""
+	}
+	rule := lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", max(0, h.width)))
+	return rule + "\n" + line
+}
+
 func (h *Home) quotaBarHeight() int {
-	if h.quotaBarLine() == "" {
+	if h.quotaBarBlock() == "" {
 		return 0
 	}
-	return 1
+	return 2
 }
