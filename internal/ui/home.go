@@ -14832,10 +14832,10 @@ func (h *Home) renderFrame() string {
 	if h.debugMode {
 		debugBarHeight = 1
 	}
-	quotaBar := h.quotaBarLine()
+	quotaBar := h.quotaBarBlock()
 	quotaBarHeight := 0
 	if quotaBar != "" {
-		quotaBarHeight = 1
+		quotaBarHeight = 2
 	}
 	// Height breakdown: -1 header, -filterBarHeight filter, -updateBannerHeight banner, -maintenanceBannerHeight maintenance, -quotaBarHeight quota, -helpBarHeight help, -debugBarHeight debug
 	contentHeight := h.height - 1 - helpBarHeight - updateBannerHeight - maintenanceBannerHeight - filterBarHeight - debugBarHeight - quotaBarHeight
