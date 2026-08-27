@@ -13,6 +13,7 @@ import (
 
 	"github.com/asheshgoplani/agent-deck/internal/costs"
 	"github.com/asheshgoplani/agent-deck/internal/logging"
+	"github.com/asheshgoplani/agent-deck/internal/quota"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 	"golang.org/x/time/rate"
 )
@@ -165,6 +166,7 @@ type Server struct {
 	menuSubscribers   map[chan struct{}]struct{}
 
 	costStore       *costs.Store
+	quotaStore      *quota.Store
 	mutator         SessionMutator
 	skills          SkillsService
 	mcpMgr          MCPManager
@@ -281,6 +283,7 @@ func NewServer(cfg Config) *Server {
 	mux.HandleFunc("/api/costs/stream", s.handleCostsStream)
 
 	mux.HandleFunc("/api/system/stats", s.handleSystemStats)
+	mux.HandleFunc("/api/quota", s.handleQuota)
 
 	mux.HandleFunc("/api/skills", s.handleSkillsCatalog)
 
@@ -426,6 +429,11 @@ func (s *Server) unsubscribeMenuChanges(ch chan struct{}) {
 
 func (s *Server) SetCostStore(store *costs.Store) {
 	s.costStore = store
+}
+
+// SetQuotaStore injects the provider usage cache the poller writes to.
+func (s *Server) SetQuotaStore(store *quota.Store) {
+	s.quotaStore = store
 }
 
 // SetMutator injects the session mutator implementation (typically *ui.WebMutator).
