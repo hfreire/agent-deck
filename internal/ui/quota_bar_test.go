@@ -62,7 +62,9 @@ func TestRenderQuotaBarDegradesWithWidth(t *testing.T) {
 		{width: 70, wantAbsent: []string{"Fable", "3h 36m"}, wantPresen: []string{"17%", "43%"}},
 		// The meter is decoration; the weekly number outranks it.
 		{width: 46, wantAbsent: []string{"░"}, wantPresen: []string{"QUOTA", "17%", "43%"}},
-		{width: 30, wantAbsent: []string{"QUOTA", "43%", "6%"}, wantPresen: []string{"[CLAUDE]", "17%", "0%"}},
+		{width: 40, wantAbsent: []string{"░", "[CLAUDE]"}, wantPresen: []string{"[CL]", "17%", "43%"}},
+		{width: 30, wantAbsent: []string{"░", "43%", "6%"}, wantPresen: []string{"QUOTA", "[CL]", "17%", "0%"}},
+		{width: 22, wantAbsent: []string{"QUOTA", "43%"}, wantPresen: []string{"[CL]", "17%", "0%"}},
 	}
 	for _, tc := range tests {
 		got := stripAnsi(renderQuotaBar(snaps, tc.width, now))
@@ -93,7 +95,7 @@ func TestRenderQuotaBarSkipsProvidersWithoutWindows(t *testing.T) {
 	now := quotaNow()
 	broken := quota.Snapshot{Provider: quota.ProviderGemini, Err: "network down", UpdatedAt: now}
 	got := stripAnsi(renderQuotaBar([]quota.Snapshot{claudeSnapshot(now), broken}, 200, now))
-	if strings.Contains(got, quotaLabel(quota.ProviderGemini)) {
+	if strings.Contains(got, quotaLabel(quota.ProviderGemini, false)) {
 		t.Fatalf("bar %q should omit a provider with no numbers", got)
 	}
 }
@@ -105,16 +107,51 @@ func TestRenderQuotaBarEmptyInput(t *testing.T) {
 }
 
 func TestQuotaLabel(t *testing.T) {
-	tests := map[string]string{
-		quota.ProviderClaude: "[CLAUDE]",
-		quota.ProviderCodex:  "[CODEX]",
-		quota.ProviderGemini: "[GEMINI]",
-		"mystery":            "[MYSTERY]",
+	tests := []struct {
+		provider string
+		long     string
+		short    string
+	}{
+		{quota.ProviderClaude, "[CLAUDE]", "[CL]"},
+		{quota.ProviderCodex, "[CODEX]", "[CO]"},
+		{quota.ProviderGemini, "[GEMINI]", "[GE]"},
+		{"x", "[X]", "[X]"},
 	}
-	for provider, want := range tests {
-		if got := quotaLabel(provider); got != want {
-			t.Fatalf("quotaLabel(%q) = %q, want %q", provider, got, want)
+	for _, tc := range tests {
+		if got := quotaLabel(tc.provider, false); got != tc.long {
+			t.Fatalf("quotaLabel(%q, long) = %q, want %q", tc.provider, got, tc.long)
 		}
+		if got := quotaLabel(tc.provider, true); got != tc.short {
+			t.Fatalf("quotaLabel(%q, short) = %q, want %q", tc.provider, got, tc.short)
+		}
+	}
+}
+
+// Labels are decoration: abbreviating them costs less than losing a number, so
+// they shrink before any window is dropped.
+func TestRenderQuotaBarShortensLabelsBeforeDroppingData(t *testing.T) {
+	now := quotaNow()
+	gemini := quota.Snapshot{
+		Provider:  quota.ProviderGemini,
+		Session:   &quota.Window{UsedPercent: 12, WindowMinutes: 300, ResetsAt: now.Add(2*time.Hour + 5*time.Minute)},
+		Weekly:    &quota.Window{UsedPercent: 61, WindowMinutes: 10080, ResetsAt: now.Add(3*24*time.Hour + 2*time.Hour)},
+		UpdatedAt: now,
+	}
+	snaps := []quota.Snapshot{claudeSnapshot(now), codexSnapshot(now), gemini}
+
+	full := stripAnsi(renderQuotaBar(snaps, 200, now))
+	if !strings.Contains(full, "[GEMINI]") {
+		t.Fatalf("wide bar %q should use long labels", full)
+	}
+
+	narrow := stripAnsi(renderQuotaBar(snaps, 130, now))
+	for _, want := range []string{"[CL]", "[CO]", "[GE]", "3h 36m", "0% Fable"} {
+		if !strings.Contains(narrow, want) {
+			t.Fatalf("bar %q should have abbreviated labels and kept %q", narrow, want)
+		}
+	}
+	if lipgloss.Width(narrow) > 130 {
+		t.Fatalf("bar is %d wide: %q", lipgloss.Width(narrow), narrow)
 	}
 }
 

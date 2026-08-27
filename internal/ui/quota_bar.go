@@ -30,6 +30,7 @@ type quotaTier int
 
 const (
 	quotaTierFull quotaTier = iota
+	quotaTierShortLabels
 	quotaTierNoExtras
 	quotaTierNoResets
 	quotaTierNoMeter
@@ -39,6 +40,7 @@ const (
 
 var quotaTiers = []quotaTier{
 	quotaTierFull,
+	quotaTierShortLabels,
 	quotaTierNoExtras,
 	quotaTierNoResets,
 	quotaTierNoMeter,
@@ -46,8 +48,15 @@ var quotaTiers = []quotaTier{
 	quotaTierNoTitle,
 }
 
-func quotaLabel(provider string) string {
-	return "[" + strings.ToUpper(provider) + "]"
+// quotaLabel names the provider. The abbreviation is the first two letters
+// rather than a per-provider table, so a provider we do not know about yet
+// still shrinks.
+func quotaLabel(provider string, short bool) string {
+	name := strings.ToUpper(provider)
+	if short {
+		name = string([]rune(name)[:min(2, len([]rune(name)))])
+	}
+	return "[" + name + "]"
 }
 
 // quotaTitleStyle mirrors renderPanelTitle so QUOTA reads as a section title
@@ -132,7 +141,7 @@ func quotaAppendSegment(line *quotaLine, snap quota.Snapshot, tier quotaTier, no
 		primary = snap.Weekly
 	}
 
-	line.add(quotaLabel(snap.Provider), dimStyle)
+	line.add(quotaLabel(snap.Provider, tier >= quotaTierShortLabels), dimStyle)
 	line.add(" ", dimStyle)
 	if tier < quotaTierNoMeter {
 		line.add(quotaMeter(primary.UsedPercent), style(primary.UsedPercent))
@@ -148,7 +157,7 @@ func quotaAppendSegment(line *quotaLine, snap quota.Snapshot, tier quotaTier, no
 	line.add(quotaWindowJoiner, dimStyle)
 	line.add(quotaWindowText(*snap.Weekly, showReset, now), style(snap.Weekly.UsedPercent))
 
-	if tier > quotaTierFull {
+	if tier > quotaTierShortLabels {
 		return
 	}
 	for _, extra := range snap.Extra {
