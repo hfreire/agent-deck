@@ -66,14 +66,21 @@ func quotaTitleStyle() lipgloss.Style {
 }
 
 func quotaMeter(percent float64) string {
-	filled := int(math.Ceil(percent / 100 * quotaMeterCells))
+	return quotaMeterWidth(percent, quotaMeterCells)
+}
+
+func quotaMeterWidth(percent float64, cells int) string {
+	if cells <= 0 {
+		return ""
+	}
+	filled := int(math.Ceil(percent / 100 * float64(cells)))
 	if filled < 0 {
 		filled = 0
 	}
-	if filled > quotaMeterCells {
-		filled = quotaMeterCells
+	if filled > cells {
+		filled = cells
 	}
-	return strings.Repeat(quotaMeterFull, filled) + strings.Repeat(quotaMeterEmpty, quotaMeterCells-filled)
+	return strings.Repeat(quotaMeterFull, filled) + strings.Repeat(quotaMeterEmpty, cells-filled)
 }
 
 func quotaColor(percent float64) lipgloss.Color {
