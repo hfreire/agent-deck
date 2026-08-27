@@ -2688,3 +2688,22 @@ func TestDockerSettings_SeedCredentialsFromKeychain(t *testing.T) {
 		t.Error("seed_credentials_from_keychain = true must be honoured")
 	}
 }
+
+func TestGetQuotaBar(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", DefaultQuotaBar},
+		{"   ", DefaultQuotaBar},
+		{"nonsense", DefaultQuotaBar},
+		{"auto", QuotaBarAuto},
+		{"OFF", QuotaBarOff},
+		{" Off ", QuotaBarOff},
+	}
+	for _, tc := range tests {
+		if got := (UISettings{QuotaBar: tc.in}).GetQuotaBar(); got != tc.want {
+			t.Errorf("GetQuotaBar(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
