@@ -39,6 +39,7 @@ import (
 	"github.com/asheshgoplani/agent-deck/internal/intervalhook"
 	"github.com/asheshgoplani/agent-deck/internal/jujutsu"
 	"github.com/asheshgoplani/agent-deck/internal/logging"
+	"github.com/asheshgoplani/agent-deck/internal/quota"
 	"github.com/asheshgoplani/agent-deck/internal/safego"
 	"github.com/asheshgoplani/agent-deck/internal/send"
 	"github.com/asheshgoplani/agent-deck/internal/session"
@@ -655,6 +656,14 @@ type Home struct {
 	orphanPolled    map[string]bool
 	groupScopeMu    sync.RWMutex // Guards groupScope for cross-goroutine read in reconcileClaims
 	lastOrphanSweep time.Time    // last time the primary polled for orphaned sessions
+	// Provider usage quota (claude/codex/gemini) shown above the help bar.
+	// quotaSnaps is the render-ordered copy of quotaStore refreshed on tick;
+	// the store itself is written by the background poller.
+	quotaStore       *quota.Store
+	quotaSnaps       []quota.Snapshot
+	quotaMode        string
+	quotaRefreshTime time.Time
+
 	// Cost tracking
 	costStore            *costs.Store
 	costPricer           *costs.Pricer
@@ -1581,6 +1590,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		h.remoteLatencyRefreshSec = cfg.UI.GetRemoteLatencyRefreshSecs(cfg.SystemStats.GetRefreshSeconds())
 		h.remoteSessionRefreshSec = cfg.UI.GetRemoteSessionRefreshSecs()
 		h.footerMode = cfg.UI.GetFooter()
+		h.quotaMode = cfg.UI.GetQuotaBar()
 		h.attachOnCreate = cfg.UI.GetAttachOnCreate()
 	} else {
 		h.fullRepaint = (session.DisplaySettings{}).GetFullRepaint()
@@ -1591,6 +1601,7 @@ func NewHomeWithProfileAndMode(profile string) *Home {
 		h.remoteLatencyRefreshSec = (session.UISettings{}).GetRemoteLatencyRefreshSecs(0)
 		h.remoteSessionRefreshSec = (session.UISettings{}).GetRemoteSessionRefreshSecs()
 		h.footerMode = (session.UISettings{}).GetFooter()
+		h.quotaMode = (session.UISettings{}).GetQuotaBar()
 	}
 	h.remoteLatency = make(map[string]session.RemoteLatency)
 
@@ -1871,6 +1882,12 @@ func (h *Home) getWebMenuData() *web.MemoryMenuData {
 	h.webMenuDataMu.RLock()
 	defer h.webMenuDataMu.RUnlock()
 	return h.webMenuData
+}
+
+// SetQuotaStore sets the provider usage store backing the quota bar.
+func (h *Home) SetQuotaStore(store *quota.Store) {
+	h.quotaStore = store
+	h.refreshQuotaSnapshots()
 }
 
 // SetCostStore sets the cost store for cost tracking display.
@@ -7101,6 +7118,12 @@ func (h *Home) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Refresh cost totals for header display
 		h.refreshCostTotals()
+
+		// Refresh provider usage quotas for the footer bar
+		if time.Since(h.quotaRefreshTime) >= 5*time.Second {
+			h.quotaRefreshTime = time.Now()
+			h.refreshQuotaSnapshots()
+		}
 
 		// Periodic UI state save (every 5 ticks = ~10 seconds)
 		h.uiStateSaveTicks++
@@ -14809,8 +14832,13 @@ func (h *Home) renderFrame() string {
 	if h.debugMode {
 		debugBarHeight = 1
 	}
-	// Height breakdown: -1 header, -filterBarHeight filter, -updateBannerHeight banner, -maintenanceBannerHeight maintenance, -helpBarHeight help, -debugBarHeight debug
-	contentHeight := h.height - 1 - helpBarHeight - updateBannerHeight - maintenanceBannerHeight - filterBarHeight - debugBarHeight
+	quotaBar := h.quotaBarLine()
+	quotaBarHeight := 0
+	if quotaBar != "" {
+		quotaBarHeight = 1
+	}
+	// Height breakdown: -1 header, -filterBarHeight filter, -updateBannerHeight banner, -maintenanceBannerHeight maintenance, -quotaBarHeight quota, -helpBarHeight help, -debugBarHeight debug
+	contentHeight := h.height - 1 - helpBarHeight - updateBannerHeight - maintenanceBannerHeight - filterBarHeight - debugBarHeight - quotaBarHeight
 
 	// Route to appropriate layout based on terminal width
 	layoutMode := h.getLayoutMode()
@@ -14829,6 +14857,11 @@ func (h *Home) renderFrame() string {
 	mainContent = ensureExactHeight(mainContent, contentHeight)
 	b.WriteString(mainContent)
 	b.WriteString("\n")
+
+	if quotaBar != "" {
+		b.WriteString(quotaBar)
+		b.WriteString("\n")
+	}
 
 	// ═══════════════════════════════════════════════════════════════════
 	// HELP BAR (context-aware shortcuts) — replaced by the insert-mode

@@ -2669,3 +2669,22 @@ func TestSaveUserConfig_OmitsUnsetGroupSort(t *testing.T) {
 		t.Errorf("config.toml must contain a set group_sort; got:\n%s", raw)
 	}
 }
+
+func TestGetQuotaBar(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", DefaultQuotaBar},
+		{"   ", DefaultQuotaBar},
+		{"nonsense", DefaultQuotaBar},
+		{"auto", QuotaBarAuto},
+		{"OFF", QuotaBarOff},
+		{" Off ", QuotaBarOff},
+	}
+	for _, tc := range tests {
+		if got := (UISettings{QuotaBar: tc.in}).GetQuotaBar(); got != tc.want {
+			t.Errorf("GetQuotaBar(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

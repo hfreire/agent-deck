@@ -423,6 +423,11 @@ type UISettings struct {
 	// action remains reachable by its key and is fully listed under help (?).
 	Footer string `toml:"footer,omitempty"`
 
+	// QuotaBar controls the provider usage line above the help bar:
+	//   "auto" — show it whenever at least one provider reports a quota.
+	//   "off"  — never show it, reclaiming the line for the session list.
+	QuotaBar string `toml:"quota_bar,omitempty"`
+
 	// NewSessionEnterAdvances controls what Enter does on the free-text
 	// Name/Branch fields of the new-session dialog. As of the UX top-3 pass this
 	// is ON BY DEFAULT (the mechanism shipped opt-in in PR #1295): Enter advances
@@ -530,6 +535,15 @@ const (
 	DefaultFooter = FooterFull
 )
 
+// Provider usage bar modes. See UISettings.QuotaBar.
+const (
+	QuotaBarAuto = "auto"
+	QuotaBarOff  = "off"
+	// DefaultQuotaBar shows the bar only once a provider actually reports
+	// usage, so users who are signed in to nothing lose no rows.
+	DefaultQuotaBar = QuotaBarAuto
+)
+
 // GetFooter returns the configured footer style, normalized to one of the
 // known values. Empty or unknown input falls back to DefaultFooter
 // ("full"). Matching is case-insensitive so users may write "Full" or
@@ -546,6 +560,15 @@ func (u UISettings) GetFooter() string {
 		return FooterCurated
 	}
 	return DefaultFooter
+}
+
+// GetQuotaBar returns the configured provider usage bar mode, normalized to
+// "auto" or "off". Empty or unknown input falls back to DefaultQuotaBar.
+func (u UISettings) GetQuotaBar() string {
+	if strings.EqualFold(strings.TrimSpace(u.QuotaBar), QuotaBarOff) {
+		return QuotaBarOff
+	}
+	return DefaultQuotaBar
 }
 
 // GetPreviewPct returns the configured preview percentage, clamped to
