@@ -134,9 +134,43 @@ func TestHomeQuotaBarBlock(t *testing.T) {
 		t.Fatalf("data line = %q, want the QUOTA title first", lines[1])
 	}
 
+	// In the dual layout the rule stops at the divider so it reads as part of
+	// the sessions column, not as a lid over the PREVIEW pane.
+	dual := &Home{width: 200, quotaMode: session.QuotaBarAuto, quotaSnaps: []quota.Snapshot{claudeSnapshot(now)}}
+	dualLines := strings.Split(stripAnsi(dual.quotaBarBlock()), "\n")
+	if want := dual.sessionsPaneWidth(); lipgloss.Width(dualLines[0]) != want {
+		t.Fatalf("dual top line is %d wide, want the sessions pane width %d", lipgloss.Width(dualLines[0]), want)
+	}
+
 	off := &Home{width: 60, quotaMode: session.QuotaBarOff, quotaSnaps: []quota.Snapshot{claudeSnapshot(now)}}
 	if got := off.quotaBarBlock(); got != "" {
 		t.Fatalf("block = %q, want empty when disabled", got)
+	}
+}
+
+// Healthy usage must not shout: only the warning bands carry a colour.
+func TestQuotaColorIsQuietUntilItMatters(t *testing.T) {
+	tests := []struct {
+		pct  float64
+		want lipgloss.Color
+	}{
+		{0, ColorText},
+		{49, ColorText},
+		{50, ColorYellow},
+		{80, ColorRed},
+	}
+	for _, tc := range tests {
+		if got := quotaColor(tc.pct); got != tc.want {
+			t.Fatalf("quotaColor(%v) = %v, want %v", tc.pct, got, tc.want)
+		}
+	}
+}
+
+// The QUOTA title is a panel title like SESSIONS, and must stay in step with it.
+func TestQuotaTitleMatchesPanelTitle(t *testing.T) {
+	panel := lipgloss.NewStyle().Foreground(ColorCyan).Bold(true).Render("SESSIONS")
+	if got := quotaTitleStyle().Render("SESSIONS"); got != panel {
+		t.Fatalf("quota title style = %q, want the panel title style %q", got, panel)
 	}
 }
 

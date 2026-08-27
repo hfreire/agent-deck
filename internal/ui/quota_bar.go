@@ -50,6 +50,12 @@ func quotaLabel(provider string) string {
 	return "[" + strings.ToUpper(provider) + "]"
 }
 
+// quotaTitleStyle mirrors renderPanelTitle so QUOTA reads as a section title
+// alongside SESSIONS and PREVIEW.
+func quotaTitleStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(ColorCyan).Bold(true)
+}
+
 func quotaMeter(percent float64) string {
 	filled := int(math.Ceil(percent / 100 * quotaMeterCells))
 	if filled < 0 {
@@ -68,7 +74,7 @@ func quotaColor(percent float64) lipgloss.Color {
 	case percent >= 50:
 		return ColorYellow
 	default:
-		return ColorGreen
+		return ColorText
 	}
 }
 
@@ -169,7 +175,7 @@ func renderQuotaBar(snaps []quota.Snapshot, width int, now time.Time) string {
 	for _, tier := range quotaTiers {
 		line := &quotaLine{}
 		if tier < quotaTierNoTitle {
-			line.add(quotaTitle+quotaTitleGap, lipgloss.NewStyle().Foreground(ColorTextDim).Bold(true))
+			line.add(quotaTitle+quotaTitleGap, quotaTitleStyle())
 		}
 		for i, snap := range usable {
 			if i > 0 {
@@ -218,8 +224,17 @@ func (h *Home) quotaBarBlock() string {
 	if line == "" {
 		return ""
 	}
-	rule := lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", max(0, h.width)))
+	rule := lipgloss.NewStyle().Foreground(ColorBorder).Render(strings.Repeat("─", max(0, h.quotaRuleWidth())))
 	return rule + "\n" + line
+}
+
+// quotaRuleWidth stops the rule at the pane divider in the dual layout, so it
+// closes the sessions column instead of cutting across PREVIEW.
+func (h *Home) quotaRuleWidth() int {
+	if h.getLayoutMode() == LayoutModeDual {
+		return h.sessionsPaneWidth()
+	}
+	return h.width
 }
 
 func (h *Home) quotaBarHeight() int {
