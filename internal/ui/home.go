@@ -10002,7 +10002,7 @@ func (h *Home) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return h, nil
 		}
 		h.showCostDashboard = true
-		h.costDashboard = newCostDashboard(h.costStore, h.width, h.height)
+		h.costDashboard = newCostDashboard(h.costStore, h.quotaStore, h.width, h.height)
 		return h, nil
 
 	case FilterKeyError, "shift+7":
