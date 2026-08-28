@@ -5706,6 +5706,12 @@ func (i *Instance) UpdateStatus() error {
 	// Cheap no-op unless the cold-load fold below (or an earlier
 	// UpdateHookStatus within the throttle window) left something behind.
 	defer i.persistLastActivity(false)
+	// Keep the usage-limit memo warm for CachedSubstate. Declared before the Lock
+	// so it runs AFTER the deferred Unlock — the refresh takes i.mu itself. It is
+	// throttled to usageLimitScanInterval internally and returns immediately for
+	// any session without a bound Claude conversation, so the fleet-wide cost is a
+	// map read per poll for everything else.
+	defer i.RefreshUsageLimit()
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
@@ -10117,12 +10123,15 @@ func (i *Instance) CachedSubstate() Substate {
 	if i.AuthHeldCached() {
 		return SubstateAuth401
 	}
-	// Deliberately NOT wired for usage-limit: this path must stay
-	// filesystem-free, and nothing in the background status pass populates a
-	// usage-limit mirror, so a branch here would be dead on the TUI/Web/transition
-	// surfaces while looking supported. usage-limit is a live-Substate signal in
-	// this change (CLI/JSON/fleet); wiring the cached path belongs with whatever
-	// populates it. See usagelimit.go (#1802).
+	// Usage-limit is read from the memo, never re-derived: forming the verdict
+	// costs transcript I/O and this path must stay filesystem-free. UpdateStatus
+	// is what keeps the memo warm (see RefreshUsageLimit), which is what makes the
+	// branch live rather than decorative on the TUI/Web/transition surfaces. Same
+	// precedence as Substate: a recent 429 proves the request authenticated, so it
+	// outranks a stale pane banner. See usagelimit.go (#1802).
+	if i.usageLimitCached() {
+		return SubstateUsageLimit
+	}
 	tmuxSess := i.GetTmuxSession()
 	if tmuxSess == nil {
 		return SubstateNone
