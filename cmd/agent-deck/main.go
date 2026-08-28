@@ -736,9 +736,10 @@ func main() {
 	// ═══════════════════════════════════════════════════════════════════
 	// Provider Usage Quota (claude / codex / gemini)
 	// ═══════════════════════════════════════════════════════════════════
+	var quotaStore *quota.Store
 	if quotaCfg, _ := session.LoadUserConfig(); quotaCfg == nil || quotaCfg.UI.GetQuotaBar() != session.QuotaBarOff {
 		if quotaPath, pathErr := agentpaths.CachePath("quota.json"); pathErr == nil {
-			quotaStore := quota.NewStore(quotaPath)
+			quotaStore = quota.NewStore(quotaPath)
 			// Seed from the last run so the bar has numbers before the first
 			// fetch returns.
 			_ = quotaStore.Load()
@@ -889,6 +890,9 @@ func main() {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: web server setup failed: %v\n", err)
 			os.Exit(1)
+		}
+		if quotaStore != nil {
+			server.SetQuotaStore(quotaStore)
 		}
 		if costStore != nil {
 			server.SetCostStore(costStore)
