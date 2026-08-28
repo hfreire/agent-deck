@@ -25,11 +25,13 @@ import (
 	"github.com/muesli/termenv"
 	"golang.org/x/term"
 
+	"github.com/asheshgoplani/agent-deck/internal/agentpaths"
 	"github.com/asheshgoplani/agent-deck/internal/costs"
 	"github.com/asheshgoplani/agent-deck/internal/feedback"
 	"github.com/asheshgoplani/agent-deck/internal/git"
 	"github.com/asheshgoplani/agent-deck/internal/intervalhook"
 	"github.com/asheshgoplani/agent-deck/internal/logging"
+	"github.com/asheshgoplani/agent-deck/internal/quota"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 	"github.com/asheshgoplani/agent-deck/internal/statedb"
 	"github.com/asheshgoplani/agent-deck/internal/tmux"
@@ -728,6 +730,31 @@ func main() {
 					}
 				}
 			}
+		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════════
+	// Provider Usage Quota (claude / codex / gemini)
+	// ═══════════════════════════════════════════════════════════════════
+	if quotaCfg, _ := session.LoadUserConfig(); quotaCfg == nil || quotaCfg.UI.GetQuotaBar() != session.QuotaBarOff {
+		if quotaPath, pathErr := agentpaths.CachePath("quota.json"); pathErr == nil {
+			quotaStore := quota.NewStore(quotaPath)
+			// Seed from the last run so the bar has numbers before the first
+			// fetch returns.
+			_ = quotaStore.Load()
+			homeModel.SetQuotaStore(quotaStore)
+
+			quotaCtx, quotaCancel := context.WithCancel(context.Background())
+			defer quotaCancel()
+			poller := &quota.Poller{
+				Store: quotaStore,
+				Fetchers: []quota.Fetcher{
+					&quota.ClaudeFetcher{},
+					&quota.CodexFetcher{},
+					&quota.GeminiFetcher{},
+				},
+			}
+			go poller.Run(quotaCtx)
 		}
 	}
 
