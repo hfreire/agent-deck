@@ -8769,6 +8769,15 @@ func (i *Instance) restart(env map[string]string) error {
 	if spawnedSince(i.ID, beforeLock) && len(env) == 0 {
 		return nil
 	}
+	// A normal restart is a promise to continue the existing conversation.
+	// Resolve every prerequisite before bumping generations, killing a pane, or
+	// rebuilding MCP/config state. In particular, tmux accepts a missing -c and
+	// silently lands in $HOME, while the tool builders historically treated a
+	// missing resume target as permission to start fresh.
+	if err := i.preflightResumeRestart(); err != nil {
+		i.Status = StatusError
+		return err
+	}
 	defer recordInstanceSpawn(i.ID)
 
 	// #1775: supersede the fast-death watcher from the PREVIOUS spawn here, at
@@ -8818,19 +8827,8 @@ func (i *Instance) restart(env map[string]string) error {
 	// per (sourceProfileDir, plugins-set) and best-effort on failure.
 	i.prepareWorkerScratchConfigDirForSpawn()
 
-	// Issue #956: custom-command Claude sessions whose hooks never fired
-	// (or whose wrapper script overrode CLAUDE_CONFIG_DIR) arrive at
-	// Restart() with empty ClaudeSessionID even when the live conversation
-	// wrote a JSONL to disk. Without this prelude the fallback recreate
-	// path below dispatches through buildClaudeCommand(i.Command), re-runs
-	// the wrapper fresh, and silently drops chat history. Discovery here
-	// populates ClaudeSessionID so the respawn-pane fast path
-	// (buildClaudeResumeCommand) engages and emits `claude --resume <uuid>`.
-	// Mirrors Start()'s ensureClaudeSessionIDFromDisk but bypasses the
-	// #608 brand-new-session gate — Restart() implies the instance ran.
-	if IsClaudeCompatible(i.Tool) && i.ClaudeSessionID == "" {
-		i.ensureClaudeSessionIDFromDiskForRestart()
-	}
+	// Resume-id discovery happens in preflightResumeRestart, before any
+	// destructive restart work, so every branch below has a vouched target.
 
 	// If Claude session with known ID AND tmux session exists, use respawn-pane.
 	if IsClaudeCompatible(i.Tool) && i.ClaudeSessionID != "" && i.tmuxSession != nil && i.tmuxSession.Exists() {
@@ -9006,23 +9004,8 @@ func (i *Instance) restart(env map[string]string) error {
 		return nil
 	}
 
-	// For Codex: try to update session ID, but only if we don't already have one.
-	// When we already have a known session ID (from the database), trust it —
-	// the disk scan can return a wrong ID when multiple instances share the same
-	// project_path. The process probe is authoritative but only works when the
-	// process is running, which it isn't during a restart.
-	if IsCodexCompatible(i.Tool) && i.CodexSessionID == "" {
-		i.mu.Lock()
-		i.pendingCodexRestartWarning = ""
-		i.mu.Unlock()
-		if missingDep := i.updateCodexSession(i.collectOtherCodexSessionIDs(), true); missingDep != "" {
-			i.mu.Lock()
-			i.pendingCodexRestartWarning = codexProbeMissingWarning(missingDep)
-			i.mu.Unlock()
-			sessionLog.Warn("codex_probe_dep_missing_for_restart", slog.String("dependency", missingDep))
-		}
-	}
-
+	// Codex resume-id recovery also happens in preflightResumeRestart. A stored
+	// ID wins over disk discovery when several sessions share one project path.
 	// If Codex session AND tmux session exists, use respawn-pane
 	if IsCodexCompatible(i.Tool) && i.tmuxSession != nil && i.tmuxSession.Exists() {
 		// Try to get session ID from tmux environment if not already set

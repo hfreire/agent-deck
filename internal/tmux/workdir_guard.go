@@ -83,6 +83,13 @@ var ErrWorkDirUnavailable = errors.New("session working directory is unavailable
 // longer exists — the pane holds only a broken shell and the agent never ran.
 var ErrPaneCwdDeleted = errors.New("tmux pane started in a deleted working directory")
 
+// ValidateStartWorkDir applies the same cwd checks as Session.Start without
+// spawning or mutating a tmux session. Restart callers use it before teardown.
+func ValidateStartWorkDir(workDir string) error {
+	_, err := resolveStartWorkDir(workDir)
+	return err
+}
+
 // resolveStartWorkDir absolutises and validates the directory a session is
 // about to start in. It returns the path to hand to `tmux new-session -c`, or
 // an error describing exactly what is wrong.
