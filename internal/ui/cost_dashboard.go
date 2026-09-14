@@ -3,31 +3,36 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/asheshgoplani/agent-deck/internal/costs"
+	"github.com/asheshgoplani/agent-deck/internal/quota"
 )
 
 type costDashboard struct {
-	store     *costs.Store
-	width     int
-	height    int
-	today     costs.CostSummary
-	week      costs.CostSummary
-	month     costs.CostSummary
-	top       []costs.SessionCost
-	byModel   map[string]int64
-	projected int64
+	store      *costs.Store
+	quotaStore *quota.Store
+	quota      []quota.Snapshot
+	width      int
+	height     int
+	today      costs.CostSummary
+	week       costs.CostSummary
+	month      costs.CostSummary
+	top        []costs.SessionCost
+	byModel    map[string]int64
+	projected  int64
 }
 
-func newCostDashboard(store *costs.Store, width, height int) costDashboard {
-	d := costDashboard{store: store, width: width, height: height}
+func newCostDashboard(store *costs.Store, quotaStore *quota.Store, width, height int) costDashboard {
+	d := costDashboard{store: store, quotaStore: quotaStore, width: width, height: height}
 	d.refresh()
 	return d
 }
 
 func (d *costDashboard) refresh() {
+	d.refreshQuota()
 	if d.store == nil {
 		return
 	}
@@ -37,6 +42,22 @@ func (d *costDashboard) refresh() {
 	d.top, _ = d.store.TopSessionsByCost(5)
 	d.byModel, _ = d.store.CostByModel()
 	d.projected, _ = d.store.ProjectedMonthly()
+}
+
+// refreshQuota copies the poller's latest snapshots in the same order as the
+// footer bar. The store is shared in-process, so this is a map read, not I/O.
+func (d *costDashboard) refreshQuota() {
+	if d.quotaStore == nil {
+		return
+	}
+	all := d.quotaStore.All()
+	snaps := make([]quota.Snapshot, 0, len(all))
+	for _, provider := range quotaProviderOrder {
+		if snap, ok := all[provider]; ok {
+			snaps = append(snaps, snap)
+		}
+	}
+	d.quota = snaps
 }
 
 func (d costDashboard) View() string {
@@ -66,6 +87,11 @@ func (d costDashboard) View() string {
 		tokenStyle.Render(formatTokens(d.today.TotalCacheReadTokens)),
 		tokenStyle.Render(formatTokens(d.today.TotalCacheWriteTokens)),
 	))
+
+	if section := renderQuotaSection(d.quota, d.width, time.Now()); section != "" {
+		b.WriteString(section)
+		b.WriteString("\n")
+	}
 
 	// Top sessions
 	sectionStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorText).Underline(true)
