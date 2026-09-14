@@ -3404,6 +3404,31 @@ func (i *Instance) collectOtherCodexSessionIDs() map[string]bool {
 	return exclude
 }
 
+// otherCodexSessionIDsForInstance is indirected so the ownership boundary can
+// be tested without a live tmux server.
+var otherCodexSessionIDsForInstance = func(i *Instance) map[string]bool {
+	return i.collectOtherCodexSessionIDs()
+}
+
+// codexSessionIDClaimedElsewhere rejects a candidate already exported by
+// another live agent-deck pane. A Codex ID names a conversation, not a cwd.
+func (i *Instance) codexSessionIDClaimedElsewhere(sessionID string, other map[string]bool, source string) bool {
+	if sessionID == "" || !other[sessionID] {
+		return false
+	}
+	_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
+		InstanceID: i.ID, Tool: i.Tool, Action: "reject", Source: source,
+		OldID: i.CodexSessionID, Candidate: sessionID,
+		Reason: "candidate_owned_by_another_live_session",
+	})
+	sessionLog.Warn("codex_session_rebind_rejected_owned_elsewhere",
+		slog.String("instance_id", i.ID),
+		slog.String("old_id", i.CodexSessionID),
+		slog.String("candidate", sessionID),
+		slog.String("source", source))
+	return true
+}
+
 // shouldScanCodexSession returns whether we should run an expensive filesystem
 // scan for Codex session rotation right now.
 func (i *Instance) shouldScanCodexSession(allowUnscoped bool) bool {
@@ -3953,17 +3978,28 @@ func (i *Instance) updateCodexSession(excludeIDs map[string]bool, forceProbe boo
 	if !IsCodexCompatible(i.Tool) {
 		return ""
 	}
+	if excludeIDs == nil {
+		excludeIDs = otherCodexSessionIDsForInstance(i)
+	}
 
 	envSessionID := ""
 
 	// 1. Try to read from tmux environment first (authoritative if set)
 	if i.tmuxSession != nil {
 		if sessionID, err := i.tmuxSession.GetEnvironment("CODEX_SESSION_ID"); err == nil && sessionID != "" {
-			envSessionID = sessionID
-			if i.CodexSessionID != sessionID {
-				i.CodexSessionID = sessionID
+			if i.codexSessionIDClaimedElsewhere(sessionID, excludeIDs, "tmux_environment") {
+				// A stale persisted binding must not make this pane resume a
+				// conversation an existing pane already owns.
+				i.CodexSessionID = ""
+				i.CodexDetectedAt = time.Time{}
+				_ = i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", "")
+			} else {
+				envSessionID = sessionID
+				if i.CodexSessionID != sessionID {
+					i.CodexSessionID = sessionID
+				}
+				i.CodexDetectedAt = time.Now()
 			}
-			i.CodexDetectedAt = time.Now()
 		}
 	}
 
@@ -3972,6 +4008,9 @@ func (i *Instance) updateCodexSession(excludeIDs map[string]bool, forceProbe boo
 	if i.shouldRunCodexProcessProbe(forceProbe) {
 		sessionID, missingDep, probeErr := i.queryCodexSessionFromProcessFiles()
 		sessionID = i.filterCodexProcessProbeCandidate(sessionID)
+		if i.codexSessionIDClaimedElsewhere(sessionID, excludeIDs, "process_probe") {
+			sessionID = ""
+		}
 		if sessionID != "" {
 			changed := sessionID != i.CodexSessionID
 			if changed {
@@ -6600,6 +6639,9 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 		i.bindClaudeSessionFromHook(sessionID, hookSource, status.Event, "rebind")
 	case IsCodexCompatible(i.Tool):
 		if sessionID == i.CodexSessionID {
+			return
+		}
+		if i.codexSessionIDClaimedElsewhere(sessionID, otherCodexSessionIDsForInstance(i), hookSource) {
 			return
 		}
 		// Quality gate (incident 2026-07-15): codex subagent threads fire
