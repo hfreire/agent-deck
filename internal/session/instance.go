@@ -3184,9 +3184,16 @@ const codexWalkDirTimeout = 5 * time.Second
 //  1. Prefer sessions whose JSONL metadata matches this instance's project path.
 //  2. Optionally allow unscoped fallback (no cwd metadata) for initial bootstrap.
 func (i *Instance) queryCodexSession(excludeIDs map[string]bool, allowUnscoped bool) string {
+	id, _ := i.queryCodexSessionChecked(excludeIDs, allowUnscoped)
+	return id
+}
+
+// queryCodexSessionChecked is queryCodexSession that also reports whether the
+// walk read the whole sessions tree, so callers can tell "none" from "unknown".
+func (i *Instance) queryCodexSessionChecked(excludeIDs map[string]bool, allowUnscoped bool) (string, bool) {
 	sessionsDir := filepath.Join(i.getCodexHomeDir(), "sessions")
 	if _, err := os.Stat(sessionsDir); os.IsNotExist(err) {
-		return ""
+		return "", true
 	}
 
 	uuidPattern := uuidPatternRE
@@ -3199,9 +3206,11 @@ func (i *Instance) queryCodexSession(excludeIDs map[string]bool, allowUnscoped b
 	normalizedProjectPath := normalizePath(i.ProjectPath)
 
 	var walkErr error
+	complete := true
 	if !runWithTimeout(codexWalkDirTimeout, func() {
 		walkErr = filepath.WalkDir(sessionsDir, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
+				complete = false
 				return nil // Skip errors
 			}
 
@@ -3230,6 +3239,7 @@ func (i *Instance) queryCodexSession(excludeIDs map[string]bool, allowUnscoped b
 
 			info, err := d.Info()
 			if err != nil {
+				complete = false
 				return nil
 			}
 
@@ -3242,6 +3252,11 @@ func (i *Instance) queryCodexSession(excludeIDs map[string]bool, allowUnscoped b
 			}
 
 			matchesProject, hasProjectMetadata := codexSessionMatchesProject(path, normalizedProjectPath)
+			if !hasProjectMetadata {
+				// Unreadable, oversized and cwd-less heads all look metadata-less, so
+				// this rollout's project is unknown.
+				complete = false
+			}
 			if matchesProject {
 				if bestScopedID == "" || info.ModTime().After(bestScopedTime) {
 					bestScopedID = sessionID
@@ -3269,19 +3284,20 @@ func (i *Instance) queryCodexSession(excludeIDs map[string]bool, allowUnscoped b
 			slog.String("instance_id", i.ID),
 			slog.String("sessions_dir", sessionsDir),
 			slog.Duration("timeout", codexWalkDirTimeout))
-		return ""
+		return "", false
 	}
 	if walkErr != nil {
+		complete = false
 		sessionLog.Debug("codex_scan_error", slog.String("error", walkErr.Error()))
 	}
 
 	if bestScopedID != "" {
-		return bestScopedID
+		return bestScopedID, complete
 	}
 	if allowUnscoped {
-		return bestUnscopedID
+		return bestUnscopedID, complete
 	}
-	return ""
+	return "", complete
 }
 
 // codexSessionMatchesProject checks whether a Codex session file belongs to the
@@ -8775,6 +8791,9 @@ func (i *Instance) restart(env map[string]string) error {
 	// silently lands in $HOME, while the tool builders historically treated a
 	// missing resume target as permission to start fresh.
 	if err := i.preflightResumeRestart(); err != nil {
+		// prepareRestartMCPConfig never runs on refusal; the Apply that set the
+		// flag is already on disk, so the next restart must regenerate normally.
+		i.SkipMCPRegenerate = false
 		i.Status = StatusError
 		return err
 	}
