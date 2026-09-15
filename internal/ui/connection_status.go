@@ -122,3 +122,21 @@ func authHoldBannerLines(width int) string {
 	}
 	return out
 }
+
+// rowQuotaBadge is the session-list marker for a session whose plan window is
+// spent (#1802).
+//
+// A badge and not a status glyph, deliberately: the pane is alive and accepts
+// input, so the row's ○/● is not wrong — what it cannot say is that every turn
+// the session takes is being rejected. Replacing the glyph would trade one true
+// signal for another; appending says both.
+func rowQuotaBadge(substate session.Substate, selected bool) string {
+	if substate != session.SubstateUsageLimit {
+		return ""
+	}
+	style := lipgloss.NewStyle().Foreground(ColorYellow).Bold(true)
+	if selected {
+		style = SessionStatusSelStyle
+	}
+	return style.Render(" ⚠ quota")
+}
