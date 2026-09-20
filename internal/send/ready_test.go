@@ -226,3 +226,46 @@ func TestWaitForAgentReady_StartupPromptCountResetsOnLeavingStartup(t *testing.T
 		t.Fatal("a run broken by a non-starting status must not satisfy the confirmation count")
 	}
 }
+
+// slowReadyChecker models the real cost of a poll against a contended tmux
+// server: each GetStatus is a subprocess round trip that dwarfs the 200ms
+// poll interval. It never reports ready.
+type slowReadyChecker struct {
+	latency time.Duration
+	calls   atomic.Int64
+}
+
+func (m *slowReadyChecker) GetStatus() (string, error) {
+	m.calls.Add(1)
+	time.Sleep(m.latency)
+	return "active", nil
+}
+
+func (m *slowReadyChecker) CapturePaneFresh() (string, error) { return "", nil }
+
+// Regression: WaitForAgentReady budgeted by timeout/pollInterval attempts, so
+// per-poll latency was pure overrun and `timeout` became a floor. A 10m budget
+// against a busy pane blocked past 40m with no error — a `session send` that
+// fails closed but is indistinguishable from a slow success. The budget must
+// be wall-clock.
+func TestWaitForAgentReady_TimeoutIsWallClockNotAttemptCount(t *testing.T) {
+	mock := &slowReadyChecker{latency: 500 * time.Millisecond}
+	requested := 1 * time.Second
+
+	start := time.Now()
+	err := WaitForAgentReady(mock, "shell", requested, PromptGates{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("expected timeout error, got nil (elapsed=%v)", elapsed)
+	}
+	// Attempt-count budgeting would run timeout/200ms = 5 polls at 700ms each
+	// (~3.5s). Wall-clock budgeting overshoots by at most one in-flight poll.
+	if max := requested + 200*time.Millisecond + mock.latency; elapsed > max {
+		t.Fatalf("timeout not enforced on wall clock: elapsed=%v requested=%v max=%v polls=%d",
+			elapsed, requested, max, mock.calls.Load())
+	}
+	if elapsed < requested/2 {
+		t.Fatalf("returned too quickly: elapsed=%v requested=%v", elapsed, requested)
+	}
+}
