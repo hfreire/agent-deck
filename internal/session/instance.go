@@ -2215,6 +2215,12 @@ func (i *Instance) updateStatus(pass *StatusUpdatePass, syncMetadata bool) error
 	// Cheap no-op unless the cold-load fold below (or an earlier
 	// UpdateHookStatus within the throttle window) left something behind.
 	defer i.persistLastActivity(false)
+	// Keep the usage-limit memo warm for CachedSubstate. Declared before the Lock
+	// so it runs AFTER the deferred Unlock — the refresh takes i.mu itself. It is
+	// throttled to usageLimitScanInterval internally and returns immediately for
+	// any session without a bound Claude conversation, so the fleet-wide cost is a
+	// map read per poll for everything else.
+	defer i.RefreshUsageLimit()
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	// Short grace period for tmux initialization (not Claude startup)
