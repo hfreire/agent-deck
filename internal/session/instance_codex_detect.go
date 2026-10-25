@@ -187,6 +187,13 @@ const codexWalkDirTimeout = 5 * time.Second
 //  1. Prefer sessions whose JSONL metadata matches this instance's project path.
 //  2. Optionally allow unscoped fallback (no cwd metadata) for initial bootstrap.
 func (i *Instance) queryCodexSession(excludeIDs map[string]bool, allowUnscoped bool) string {
+	id, _ := i.queryCodexSessionChecked(excludeIDs, allowUnscoped)
+	return id
+}
+
+// queryCodexSessionChecked is queryCodexSession that also reports whether the
+// walk read the whole sessions tree, so callers can tell "none" from "unknown".
+func (i *Instance) queryCodexSessionChecked(excludeIDs map[string]bool, allowUnscoped bool) (string, bool) {
 	return queryCodexSessionWith(i.getCodexHomeDir(), i.ProjectPath, i.CodexStartedAt, i.ID, excludeIDs, allowUnscoped)
 }
 
@@ -196,10 +203,10 @@ var codexWalkDir = filepath.WalkDir
 // queryCodexSessionWith is queryCodexSession over explicit inputs, so the
 // status pass can run the (up to codexWalkDirTimeout) walk without holding
 // i.mu, and a timed-out walk goroutine never reads Instance fields (#2674).
-func queryCodexSessionWith(codexHome, projectPath string, codexStartedAt int64, instanceID string, excludeIDs map[string]bool, allowUnscoped bool) string {
+func queryCodexSessionWith(codexHome, projectPath string, codexStartedAt int64, instanceID string, excludeIDs map[string]bool, allowUnscoped bool) (string, bool) {
 	sessionsDir := filepath.Join(codexHome, "sessions")
 	if _, err := os.Stat(sessionsDir); os.IsNotExist(err) {
-		return ""
+		return "", true
 	}
 
 	uuidPattern := uuidPatternRE
@@ -212,9 +219,11 @@ func queryCodexSessionWith(codexHome, projectPath string, codexStartedAt int64, 
 	normalizedProjectPath := normalizePath(projectPath)
 
 	var walkErr error
+	complete := true
 	if !runWithTimeout(codexWalkDirTimeout, func() {
 		walkErr = codexWalkDir(sessionsDir, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
+				complete = false
 				return nil // Skip errors
 			}
 
@@ -243,6 +252,7 @@ func queryCodexSessionWith(codexHome, projectPath string, codexStartedAt int64, 
 
 			info, err := d.Info()
 			if err != nil {
+				complete = false
 				return nil
 			}
 
@@ -255,6 +265,11 @@ func queryCodexSessionWith(codexHome, projectPath string, codexStartedAt int64, 
 			}
 
 			matchesProject, hasProjectMetadata := codexSessionMatchesProject(path, normalizedProjectPath)
+			if !hasProjectMetadata {
+				// Unreadable, oversized and cwd-less heads all look metadata-less, so
+				// this rollout's project is unknown.
+				complete = false
+			}
 			if matchesProject {
 				if bestScopedID == "" || info.ModTime().After(bestScopedTime) {
 					bestScopedID = sessionID
@@ -282,19 +297,20 @@ func queryCodexSessionWith(codexHome, projectPath string, codexStartedAt int64, 
 			slog.String("instance_id", instanceID),
 			slog.String("sessions_dir", sessionsDir),
 			slog.Duration("timeout", codexWalkDirTimeout))
-		return ""
+		return "", false
 	}
 	if walkErr != nil {
+		complete = false
 		sessionLog.Debug("codex_scan_error", slog.String("error", walkErr.Error()))
 	}
 
 	if bestScopedID != "" {
-		return bestScopedID
+		return bestScopedID, complete
 	}
 	if allowUnscoped {
-		return bestUnscopedID
+		return bestUnscopedID, complete
 	}
-	return ""
+	return "", complete
 }
 
 // codexSessionMatchesProject checks whether a Codex session file belongs to the
@@ -1135,7 +1151,7 @@ func (i *Instance) bootstrapCodexSessionStatusLocked(excludeIDs map[string]bool,
 	codexHome, projectPath, startedAt, id := i.getCodexHomeDir(), i.ProjectPath, i.CodexStartedAt, i.ID
 
 	i.mu.Unlock()
-	sessionID := queryCodexSessionWith(codexHome, projectPath, startedAt, id, excludeIDs, allowUnscoped)
+	sessionID, _ := queryCodexSessionWith(codexHome, projectPath, startedAt, id, excludeIDs, allowUnscoped)
 	i.mu.Lock()
 
 	if sessionID != "" && !superseded() {

@@ -33,9 +33,8 @@ package session
 // #1815 rules that the ambiguity must fail closed. A discovered id is a hint,
 // never proof of ownership, so it may not authorize --resume. The cost is
 // exactly the #956 recovery: a custom-wrapper session whose id was never
-// captured now starts fresh instead of re-attaching its own history. Losing
-// one conversation's history is recoverable; adopting another session's
-// conversation is not.
+// captured cannot be resumed safely. Normal restart therefore fails visibly;
+// only the explicit RestartFresh action may start a replacement conversation.
 //
 // What survives from #956: the restart still routes through the claude spawn
 // path with an explicit session id rather than blindly re-running the wrapper.
@@ -47,7 +46,6 @@ package session
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -62,7 +60,7 @@ import (
 // Post-#1815 contract: the restart must NOT emit `--resume <discovered
 // uuid>`, and must not claim the discovered uuid via --session-id either (a
 // shared id would also make the duplicate sweeper kill one of the pair). It
-// starts fresh, on the claude spawn path, with a newly minted id.
+// refuses the restart before it mutates the live pane.
 func TestConductor_Restart_DoesNotAdoptDiscoveredTranscript_1815(t *testing.T) {
 	requireTmux(t)
 	home := isolatedHomeDir(t)
@@ -109,29 +107,13 @@ func TestConductor_Restart_DoesNotAdoptDiscoveredTranscript_1815(t *testing.T) {
 	require.NoError(t, os.WriteFile(argvLog, nil, 0o644))
 
 	// Restart: discovery offers the transcript; the identity guard refuses it.
-	require.NoError(t, inst.Restart(), "Restart: must succeed")
-
-	argv := readCapturedClaudeArgv(t, argvLog, 3*time.Second)
-	joined := strings.Join(argv, " ")
-
-	require.NotContains(t, joined, "--resume",
-		"#1815: a transcript this session cannot be shown to own must not be "+
-			"resumed. Discovery cannot distinguish this session's lost "+
-			"transcript from a neighbour's in a shared directory, so the "+
-			"ambiguity fails closed. Got argv: %v", argv)
-	require.NotContains(t, joined, jsonlUUID,
-		"#1815: the refused id may belong to another session and must not be "+
-			"reused via --session-id either (a shared CLAUDE_SESSION_ID also "+
-			"trips the duplicate sweeper). Got argv: %v", argv)
-	require.Contains(t, joined, "--session-id",
-		"#1815: the refusal must still start the session on the claude spawn "+
-			"path with an explicit fresh id (that part of #956 survives). "+
-			"Got argv: %v", argv)
-
-	// Write-through: the Instance carries the freshly minted id, not the
-	// discovered one, so nothing unverified reaches the save cycle.
-	require.NotEmpty(t, inst.ClaudeSessionID,
-		"#1815: the instance must carry the freshly minted conversation id")
-	require.NotEqual(t, jsonlUUID, inst.ClaudeSessionID,
+	// A normal restart must now fail visibly instead of converting that refusal
+	// into a successful fresh launch. RestartFresh remains the explicit escape.
+	err := inst.Restart()
+	require.ErrorContains(t, err, "cannot be resolved")
+	argv, readErr := os.ReadFile(argvLog)
+	require.NoError(t, readErr)
+	require.Empty(t, argv, "refused restart must not launch a fresh Claude process")
+	require.Empty(t, inst.ClaudeSessionID,
 		"#1815: the instance must NOT keep the discovered (unowned) uuid")
 }
