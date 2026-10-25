@@ -1232,6 +1232,9 @@ type sendDeliveryResult struct {
 	// held is how long the composer guard waited/worked before the send
 	// (bounded hold plus the final read-only settle check).
 	held time.Duration
+	// blockReason is the send.GuardRefused* cause when delivery was refused
+	// at the composer guard (deliveryComposerBlocked).
+	blockReason string
 	// draftSaved is the operator draft that was cleared from the composer to
 	// make way for the automated send (empty when no clear was needed).
 	draftSaved string
@@ -1320,6 +1323,9 @@ func (r sendDeliveryResult) jsonFields() map[string]interface{} {
 	}
 	if ms := r.held.Milliseconds(); ms > 0 {
 		fields["held_for_composer_ms"] = ms
+	}
+	if r.blockReason != "" {
+		fields["composer_block_reason"] = r.blockReason
 	}
 	if r.draftSaved != "" {
 		fields["saved_draft"] = r.draftSaved
@@ -1454,7 +1460,8 @@ func executeSend(target sendRetryTarget, tool, message string, noWait bool, tun 
 		res.held = guard.Held
 		if guard.Refused {
 			res.delivery = deliveryComposerBlocked
-			return res, fmt.Errorf("message not sent: composer is occupied or unreadable; existing draft preserved")
+			res.blockReason = guard.RefusedReason
+			return res, fmt.Errorf("message not sent: %s", composerBlockAdvice(guard.RefusedReason))
 		}
 		if claudeLike {
 			// Provenance for the #1777 attribution gate, taken from the
@@ -1497,6 +1504,28 @@ func composerDraftReaderFor(tool string) (send.ComposerDraftReader, bool) {
 		return send.CodexComposerDraft, true
 	}
 	return nil, false
+}
+
+// composerBlockAdvice turns a guard refusal into a message that says what to
+// do next. The old single string ("composer is occupied or unreadable;
+// existing draft preserved") collapsed three different causes into one and
+// left automation with retry-the-same-send as its only move — which is how a
+// busy target produced six identical consecutive failures.
+func composerBlockAdvice(reason string) string {
+	switch reason {
+	case send.GuardRefusedOperatorDraft:
+		return "an operator draft occupies the composer; it was preserved untouched. " +
+			"Retry once the operator submits or clears it"
+	case send.GuardRefusedTargetMidTurn:
+		return "the target is mid-turn: no composer is available and a pasted-text marker " +
+			"in the pane makes a later Enter unattributable. Nothing was typed. " +
+			"Resend with --defer-if-busy to hold until the turn finishes instead of retrying now"
+	case send.GuardRefusedPaneUnreadable:
+		return "the target pane could not be captured, so input cannot be authorized. " +
+			"Nothing was typed. Check the session is still alive (`agent-deck session list`)"
+	default:
+		return "composer is occupied or unreadable; existing draft preserved"
+	}
 }
 
 // skipClaudeDeliveryVerify reports whether the Claude-tuned post-send delivery
