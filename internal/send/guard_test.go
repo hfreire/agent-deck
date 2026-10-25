@@ -248,3 +248,50 @@ func TestGuardComposerDraft_NonIntrospectablePaneWithForeignMarkerNeverClears(t 
 		t.Fatalf("nothing to save or clear on a non-introspectable pane, got %+v", res)
 	}
 }
+
+// A refusal must say WHICH of the three causes it was. Collapsing them into
+// one "occupied or unreadable" string left a caller facing a mid-turn target
+// with no move except retrying the same losing send — six identical
+// consecutive failures against one busy session.
+func TestGuardComposerDraft_RefusalReasonDistinguishesCauses(t *testing.T) {
+	opts := ComposerGuardOptions{HoldWait: time.Millisecond, PollInterval: time.Millisecond}
+
+	cases := []struct {
+		name   string
+		target *fakeGuardTarget
+		want   string
+	}{
+		{
+			name:   "operator draft in a visible composer",
+			target: &fakeGuardTarget{captures: []string{renderComposer("operator draft")}},
+			want:   GuardRefusedOperatorDraft,
+		},
+		{
+			// Mid-generation Claude renders no composer, and an earlier
+			// message's paste marker is still on screen.
+			name:   "mid-turn target with no composer",
+			target: &fakeGuardTarget{captures: []string{"· Thinking… (esc to interrupt)\n[Pasted text #1 +42 lines]\n"}},
+			want:   GuardRefusedTargetMidTurn,
+		},
+		{
+			name:   "unreadable pane",
+			target: &fakeGuardTarget{captureErr: errors.New("pane gone")},
+			want:   GuardRefusedPaneUnreadable,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := GuardComposerDraft(tc.target, opts)
+			if !res.Refused {
+				t.Fatalf("expected refusal, got %+v", res)
+			}
+			if res.RefusedReason != tc.want {
+				t.Fatalf("reason = %q, want %q", res.RefusedReason, tc.want)
+			}
+			if tc.target.ctrlCCalls != 0 {
+				t.Fatalf("refusal must never interrupt the pane, got %d", tc.target.ctrlCCalls)
+			}
+		})
+	}
+}
