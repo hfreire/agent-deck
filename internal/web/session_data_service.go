@@ -49,6 +49,9 @@ type SessionDataService struct {
 	// (refreshMenuTmuxCaches, menuCacheRefreshAge).
 	refreshTmuxCaches func()
 	cacheRefreshAge   time.Duration
+	// refreshStatusesFor replaces the live-state pass itself, which otherwise
+	// needs a real tmux fleet to observe.
+	refreshStatusesFor func([]*session.Instance)
 }
 
 // NewSessionDataService creates a SessionDataService for a profile.
@@ -148,11 +151,14 @@ func (s *SessionDataService) LoadMenuSnapshot() (*MenuSnapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load sessions for profile %q: %w", profile, err)
 	}
-	if s.refreshLiveState {
-		s.refreshStatuses(instances)
-	}
-
+	// Refresh only what the snapshot will contain: each session costs several
+	// tmux subprocesses, and archived ones are dropped right after. A deck
+	// with hundreds of archived sessions otherwise pays for all of them on
+	// every menu request.
 	active := session.FilterInstancesByArchive(instances, false)
+	if s.refreshLiveState {
+		s.refreshStatuses(active)
+	}
 	return BuildMenuSnapshot(profile, active, groupsData, s.now()), nil
 }
 
@@ -317,6 +323,10 @@ func refreshMenuTmuxCaches() {
 }
 
 func (s *SessionDataService) refreshStatuses(instances []*session.Instance) {
+	if s.refreshStatusesFor != nil {
+		s.refreshStatusesFor(instances)
+		return
+	}
 	// Keep tmux caches warm so per-instance status checks reflect current pane state.
 	refreshCaches := refreshMenuTmuxCaches
 	if s.refreshTmuxCaches != nil {
