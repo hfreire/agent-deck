@@ -185,9 +185,10 @@ func loadAccountUsage(store *quota.Store, name string) accountUsageCacheEntry {
 	return unreadable
 }
 
-// CollectAccountUsage lists this host's named Claude account slots — the same
-// [profiles.<name>.claude].config_dir bindings `accounts --json` reports —
-// and each one's cached quota usage, sorted by name. Used both by the
+// CollectAccountUsage lists this host's Claude account slots — the same ones
+// the usage feed writes for, so the implicit ~/.claude account is included
+// alongside the [profiles.<name>.claude].config_dir bindings — and each one's
+// cached quota usage, sorted by name. Used both by the
 // remote-side `system stats` gatherer (assembling the accounts block of the
 // poll payload on the remote host) and the controller's own local header:
 // both read the vantage point's own local quota cache, never one over SSH.
@@ -195,21 +196,22 @@ func CollectAccountUsage(config *UserConfig, cache *AccountUsageCache, now time.
 	if config == nil || cache == nil {
 		return nil
 	}
-	names := configuredClaudeAccountNames(config)
-	if len(names) == 0 {
+	slots := ClaudeUsageFeedSlots(config)
+	if len(slots) == 0 {
 		return nil
 	}
-	out := make([]AccountUsage, 0, len(names))
-	for _, name := range names {
-		usage := cache.Get(name, now)
+	out := make([]AccountUsage, 0, len(slots))
+	for _, slot := range slots {
+		usage := cache.Get(slot.Name, now)
 		// A slot whose statusLine does not run the ingester has no feed:
 		// its quota file will never appear, which is a different fix
 		// (`hooks install`) than waiting for Claude to refresh.
-		if !usage.Known && usage.UnknownReason == AccountUsageNoData && !UsageFeedStatus(config.GetProfileClaudeConfigDir(name), name).Wired {
+		if !usage.Known && usage.UnknownReason == AccountUsageNoData && !UsageFeedStatus(slot.ConfigDir, slot.Name).Wired {
 			usage.UnknownReason = AccountUsageNoFeed
 		}
 		out = append(out, usage)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
