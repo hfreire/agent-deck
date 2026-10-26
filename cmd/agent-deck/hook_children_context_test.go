@@ -40,6 +40,29 @@ func TestFormatChildrenContext(t *testing.T) {
 		}
 	})
 
+	// Regression: the completion ledger behind DoneStatus is never cleared
+	// when a child starts its next turn, so a child that completed once keeps
+	// that record forever. Reading it ahead of live status announced a child
+	// that was demonstrably `running` as "completed", replaying an earlier
+	// turn's summary — 17 such false reports and zero true positives in one
+	// orchestration session, re-rendered on every parent turn.
+	t.Run("live running status beats a stale ledger entry", func(t *testing.T) {
+		rows := []childRow{
+			{ID: "a1", Title: "lint-a", Status: "running", DoneStatus: "ok", DoneSummary: "finished an earlier turn"},
+			{ID: "b2", Title: "lint-b", Status: "starting", DoneStatus: "ok", DoneSummary: "also stale"},
+		}
+		got := formatChildrenContext(rows)
+		if strings.Contains(got, "completed:") || strings.Contains(got, "stale") {
+			t.Errorf("mid-turn children must not be announced as completed: %q", got)
+		}
+		if !strings.Contains(got, "2 running") || !strings.Contains(got, "0 done") {
+			t.Errorf("expected 2 running / 0 done in %q", got)
+		}
+		if strings.Contains(got, "stopped/other") {
+			t.Errorf("header math should balance without an other bucket: %q", got)
+		}
+	})
+
 	t.Run("done child shows sentinel status and summary", func(t *testing.T) {
 		rows := []childRow{
 			{ID: "a1", Title: "lint-a", Status: "idle", DoneStatus: "fail", DoneSummary: "tests broke"},
