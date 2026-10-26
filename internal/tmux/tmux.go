@@ -849,10 +849,10 @@ func NewSession(name, workDir string) *Session {
 		Created:               time.Now(),
 		startupAt:             time.Now(),
 		lastStableStatus:      "waiting",
-		toolDetectExpiry:      30 * time.Second, // Re-detect tool every 30 seconds
-		injectStatusLine:      true,             // Default: inject status bar
-		mouse:                 true,             // Default: mouse on (#730 opt-out)
-		terminalChromeEnabled: false,            // Default: opt-in (set true via [terminal].iterm_badge)
+		toolDetectExpiry:      30 * time.Second,             // Re-detect tool every 30 seconds
+		injectStatusLine:      getDefaultInjectStatusLine(), // Default: inject status bar
+		mouse:                 true,                         // Default: mouse on (#730 opt-out)
+		terminalChromeEnabled: false,                        // Default: opt-in (set true via [terminal].iterm_badge)
 		// stateTracker and promptDetector will be created lazily on first status check
 	}
 }
