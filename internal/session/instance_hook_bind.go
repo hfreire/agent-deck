@@ -333,6 +333,10 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 		// rejected thread's turn-end is not this pane's turn-finished edge,
 		// and its "waiting" must not release `session send --defer-if-busy`
 		// into a main turn that is still running.
+		if i.codexSessionIDClaimedElsewhere(sessionID, peerCodexSessionIDs(i, nil), hookSource) {
+			restoreHook()
+			return
+		}
 		if i.shouldRejectCodexSubagentRebind(sessionID) {
 			restoreHook()
 			_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{

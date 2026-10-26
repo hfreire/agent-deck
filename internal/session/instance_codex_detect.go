@@ -395,6 +395,34 @@ func (i *Instance) collectOtherCodexSessionIDs() map[string]bool {
 	return i.codexExclusions(nil)
 }
 
+// peerCodexSessionIDs reports the IDs other live panes own. Test seam.
+var peerCodexSessionIDs = func(i *Instance, pass *StatusUpdatePass) map[string]bool {
+	return i.codexExclusionsCached(pass)
+}
+
+// codexSessionIDClaimedElsewhere rejects a candidate already exported by
+// another live agent-deck pane. A Codex ID names a conversation, not a cwd, so
+// two panes bound to one ID resume each other's thread; upstream ownership
+// only excludes peers during the bootstrap disk scan, leaving the tmux
+// environment, the process probe and the hook payload free to adopt a peer's
+// thread from a stale persisted binding.
+func (i *Instance) codexSessionIDClaimedElsewhere(sessionID string, other map[string]bool, source string) bool {
+	if sessionID == "" || !other[sessionID] {
+		return false
+	}
+	_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
+		InstanceID: i.ID, Tool: i.Tool, Action: "reject", Source: source,
+		OldID: i.CodexSessionID, Candidate: sessionID,
+		Reason: "candidate_owned_by_another_live_session",
+	})
+	sessionLog.Warn("codex_session_rebind_rejected_owned_elsewhere",
+		slog.String("instance_id", i.ID),
+		slog.String("old_id", i.CodexSessionID),
+		slog.String("candidate", sessionID),
+		slog.String("source", source))
+	return true
+}
+
 // shouldScanCodexSession returns whether we should run an expensive filesystem
 // scan for Codex session rotation right now.
 func (i *Instance) shouldScanCodexSession(allowUnscoped bool) bool {
@@ -985,17 +1013,32 @@ func (i *Instance) updateCodexSessionForPass(excludeIDs map[string]bool, forcePr
 		return ""
 	}
 
+	// Peer claims come from evidence already collected: this runs with i.mu
+	// held on the status path, where a tmux read would stall every reader.
+	peerClaims := excludeIDs
+	if peerClaims == nil {
+		peerClaims = peerCodexSessionIDs(i, pass)
+	}
+
 	envSessionID := ""
 
 	// 1. Try to read from tmux environment first (authoritative if set)
 	if i.tmuxSession != nil {
 		if sessionID, err := i.tmuxSession.GetEnvironment("CODEX_SESSION_ID"); err == nil && sessionID != "" {
-			envSessionID = sessionID
-			if i.CodexSessionID != sessionID {
-				i.CodexSessionID = sessionID
+			if i.codexSessionIDClaimedElsewhere(sessionID, peerClaims, "tmux_environment") {
+				// A stale persisted binding must not make this pane resume a
+				// conversation an existing pane already owns.
+				i.CodexSessionID = ""
+				i.CodexDetectedAt = time.Time{}
+				_ = i.tmuxSession.SetEnvironment("CODEX_SESSION_ID", "")
+			} else {
+				envSessionID = sessionID
+				if i.CodexSessionID != sessionID {
+					i.CodexSessionID = sessionID
+				}
+				i.CodexDetectedAt = time.Now()
+				i.recordCodexOwnership(i.CodexSessionID)
 			}
-			i.CodexDetectedAt = time.Now()
-			i.recordCodexOwnership(i.CodexSessionID)
 		}
 	}
 
@@ -1004,6 +1047,9 @@ func (i *Instance) updateCodexSessionForPass(excludeIDs map[string]bool, forcePr
 	if i.shouldRunCodexProcessProbe(forceProbe) {
 		sessionID, missingDep, probeErr := i.queryCodexSessionFromProcessFiles(pass)
 		sessionID = i.filterCodexProcessProbeCandidate(sessionID)
+		if i.codexSessionIDClaimedElsewhere(sessionID, peerClaims, "process_probe") {
+			sessionID = ""
+		}
 		if sessionID != "" {
 			changed := sessionID != i.CodexSessionID
 			if changed {
