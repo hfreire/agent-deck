@@ -650,12 +650,15 @@ func (i *Instance) CachedSubstate() Substate {
 	if i.AuthHeldCached() {
 		return SubstateAuth401
 	}
-	// Deliberately NOT wired for usage-limit: this path must stay
-	// filesystem-free, and nothing in the background status pass populates a
-	// usage-limit mirror, so a branch here would be dead on the TUI/Web/transition
-	// surfaces while looking supported. usage-limit is a live-Substate signal in
-	// this change (CLI/JSON/fleet); wiring the cached path belongs with whatever
-	// populates it. See usagelimit.go (#1802).
+	// The limit verdict is read from the memo, never re-derived: forming it
+	// costs transcript I/O and this path must stay filesystem-free. updateStatus
+	// is what keeps the memo warm (see RefreshUsageLimit), which is what makes the
+	// branch live rather than decorative on the TUI/Web/transition surfaces. Same
+	// precedence as Substate: a recent 429 proves the request authenticated, so it
+	// outranks a stale pane banner. See usagelimit.go (#1802).
+	if s := i.cachedLimitSubstate(); s != SubstateNone {
+		return s
+	}
 	if s := i.getTerminatedPaneSubstate(); s != SubstateNone {
 		return s
 	}
