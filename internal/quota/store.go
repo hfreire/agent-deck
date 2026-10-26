@@ -174,6 +174,24 @@ func (s *Store) loadOne(id string, now time.Time, staleAfter time.Duration) Snap
 	if snapshot.Label == "" {
 		snapshot.Label = ProviderLabel(id)
 	}
+	return markStale(snapshot, now, staleAfter)
+}
+
+// MarkStale applies this store's staleness bound to a snapshot that was read
+// live rather than loaded from the cache.
+//
+// It exists for Codex, whose reading is dated by the record it came out of:
+// a read that just happened can carry a measurement from hours ago, so unlike
+// a Z.ai fetch it is not fresh by construction.
+func (s *Store) MarkStale(snapshot Snapshot, now time.Time) Snapshot {
+	staleAfter := s.StaleAfter
+	if staleAfter <= 0 {
+		staleAfter = DefaultStaleAfter
+	}
+	return markStale(snapshot, now, staleAfter)
+}
+
+func markStale(snapshot Snapshot, now time.Time, staleAfter time.Duration) Snapshot {
 	snapshot.Stale = snapshot.UpdatedAt <= 0 || now.Sub(time.Unix(snapshot.UpdatedAt, 0)) > staleAfter
 	return snapshot
 }
@@ -185,6 +203,8 @@ func ProviderLabel(id string) string {
 	switch id {
 	case ProviderClaude:
 		return claudeLabel
+	case ProviderCodex:
+		return codexLabel
 	case ProviderZai:
 		return "Z.ai"
 	default:
