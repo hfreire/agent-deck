@@ -189,3 +189,25 @@ func TestStoreRejectsUnusableProviderID(t *testing.T) {
 		assert.Error(t, store.Save(Snapshot{ID: id, UpdatedAt: time.Now().Unix()}), "id %q", id)
 	}
 }
+
+func TestMarkStaleUsesTheStoresBound(t *testing.T) {
+	store, err := NewStore("markstale")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	store.StaleAfter = time.Hour
+	now := time.Now()
+
+	fresh := store.MarkStale(Snapshot{ID: ProviderCodex, UpdatedAt: now.Add(-30 * time.Minute).Unix()}, now)
+	if fresh.Stale {
+		t.Fatalf("a half-hour-old reading is stale under a one-hour bound")
+	}
+	old := store.MarkStale(Snapshot{ID: ProviderCodex, UpdatedAt: now.Add(-2 * time.Hour).Unix()}, now)
+	if !old.Stale {
+		t.Fatalf("a two-hour-old reading is fresh under a one-hour bound")
+	}
+	undated := store.MarkStale(Snapshot{ID: ProviderCodex}, now)
+	if !undated.Stale {
+		t.Fatalf("an undated reading must never read as fresh")
+	}
+}
