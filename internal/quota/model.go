@@ -40,6 +40,7 @@ import "time"
 // spelled once here rather than as literals at each call site.
 const (
 	ProviderClaude = "claude"
+	ProviderCodex  = "codex"
 	ProviderZai    = "zai"
 )
 
