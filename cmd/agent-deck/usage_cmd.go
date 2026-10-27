@@ -73,7 +73,7 @@ func handleUsage(profile string, args []string) {
 	}
 
 	store := openQuotaStore(profile)
-	report := quota.Report{Providers: collectQuota(store, codexHomeForProfile(profile), *refresh)}
+	report := quota.Report{Providers: collectQuota(store, session.CodexHomeForProfile(profile), *refresh)}
 
 	if *asJSON {
 		encoded, err := json.MarshalIndent(report, "", "  ")
@@ -244,29 +244,6 @@ func readCodexSnapshot(codexHome string, cachedSnapshot quota.Snapshot, haveCach
 			UpdatedAt: time.Now().Unix(),
 		}, true
 	}
-}
-
-// codexHomeForProfile is the Codex home whose transcripts hold this profile's
-// usage: CODEX_HOME, then the profile's own override, then the global [codex]
-// setting, then empty — which leaves ~/.codex to quota.ReadCodex, so a user
-// who configured neither still gets their numbers. The order is the one
-// internal/session resolves a Codex home in, and has to be: that is the home
-// the sessions themselves run against, and usage attributed to the wrong
-// account would be worse than no usage.
-func codexHomeForProfile(profile string) string {
-	if home := strings.TrimSpace(os.Getenv("CODEX_HOME")); home != "" {
-		return session.ExpandPath(home)
-	}
-	config, err := session.LoadUserConfig()
-	if err != nil || config == nil {
-		return ""
-	}
-	if resolved, err := session.ResolveProfileForStorage(profile); err == nil {
-		if dir := config.GetProfileCodexConfigDir(resolved); dir != "" {
-			return dir
-		}
-	}
-	return session.ExpandPath(config.Codex.ConfigDir)
 }
 
 // renderUsage is the human rendering. It is a pure function of the report and a
