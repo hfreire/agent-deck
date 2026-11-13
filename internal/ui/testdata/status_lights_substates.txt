@@ -1,4 +1,4 @@
    └─ ◐  claude
-   └─ ✕  codex
+   └─ ✕  codex ⚠ quota
    └─ ◐  claude
    └─ ◐  codex

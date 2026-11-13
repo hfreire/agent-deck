@@ -8368,6 +8368,9 @@ func (h *Home) renderSessionItem(
 		maestroBadge = mStyle.Render(" [SUPERVISOR]")
 	}
 
+	// Spent-plan-window badge — see rowQuotaBadge.
+	quotaBadge := rowQuotaBadge(instSubstate, selected)
+
 	// YOLO badge for Gemini/Codex sessions with YOLO mode enabled
 	yoloBadge := ""
 	showYolo := false
@@ -8526,6 +8529,7 @@ func (h *Home) renderSessionItem(
 	reserved := leftGutterWidth + cellWidth(baseIndent) + cellWidth(selectionPrefix) +
 		cellWidth(treeStyle.Render(treeConnector)) + cellWidth(windowChevron) + cellWidth(childFoldBadge) +
 		cellWidth(status) + 1 + cellWidth(tool) +
+		cellWidth(quotaBadge) +
 		cellWidth(maestroBadge) + cellWidth(yoloBadge) + cellWidth(worktreeBadge) +
 		cellWidth(sandboxBadge) + cellWidth(multiRepoBadge) + cellWidth(sshBadge) +
 		cellWidth(agentBadge) + cellWidth(timestampBadge)
@@ -8594,7 +8598,7 @@ func (h *Home) renderSessionItem(
 	// The leading gutter (leftGutterWidth) keeps sessions aligned with group
 	// rows, which reserve the same gutter for root hotkey numbers.
 	row := fmt.Sprintf(
-		"%s%s%s%s%s%s %s%s%s%s%s%s%s%s%s%s%s%s%s%s",
+		"%s%s%s%s%s%s %s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
 		strings.Repeat(" ", leftGutterWidth),
 		baseIndent,
 		selectionPrefix,
@@ -8603,6 +8607,7 @@ func (h *Home) renderSessionItem(
 		status,
 		title,
 		tool,
+		quotaBadge,
 		maestroBadge,
 		yoloBadge,
 		worktreeBadge,
