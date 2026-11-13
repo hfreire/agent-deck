@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/asheshgoplani/agent-deck/internal/send"
 	"github.com/asheshgoplani/agent-deck/internal/session"
 )
 
@@ -67,15 +68,16 @@ func formatChildrenContext(rows []childRow) string {
 	running := 0
 	for _, r := range rows {
 		switch {
-		// Issue #2469: a child that asserted done but is RUNNING again is
-		// running; the ledger is last-wins and never deleted, so without
-		// the status check an old completion was re-listed on every prompt.
-		case r.DoneStatus != "" && r.Status != "running":
+		// Issue #2469: a child that asserted done but is busy again is busy;
+		// the ledger is last-wins and never deleted, so without the status
+		// check an old completion was re-listed on every prompt. "starting"
+		// counts as busy too — a child mid-relaunch has not finished either.
+		case send.StatusIsBusy(r.Status):
+			running++
+		case r.DoneStatus != "":
 			done = append(done, r)
 		case r.Status == "waiting":
 			waiting = append(waiting, r)
-		case r.Status == "running":
-			running++
 		}
 	}
 
