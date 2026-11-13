@@ -4608,7 +4608,34 @@ var (
 	userConfigCacheMtime time.Time
 	userConfigCacheErr   error
 	userConfigCacheMu    sync.RWMutex
+
+	// resolvedUserConfigPath caches GetUserConfigPath's two existence stats:
+	// LoadUserConfig runs hundreds of times a daemon pass.
+	resolvedUserConfigPath atomic.Pointer[userConfigPathResolution]
 )
+
+const userConfigPathTTL = time.Second
+
+// userConfigNow is a test seam.
+var userConfigNow = time.Now
+
+type userConfigPathResolution struct {
+	env, path string
+	err       error
+	at        time.Time
+}
+
+// cachedUserConfigPath is GetUserConfigPath, re-resolved at most once per
+// userConfigPathTTL unless HOME or XDG_CONFIG_HOME changes.
+func cachedUserConfigPath() (string, error) {
+	env, now := os.Getenv("HOME")+"\x00"+os.Getenv("XDG_CONFIG_HOME"), userConfigNow()
+	if r := resolvedUserConfigPath.Load(); r != nil && r.env == env && now.Sub(r.at) < userConfigPathTTL {
+		return r.path, r.err
+	}
+	path, err := GetUserConfigPath()
+	resolvedUserConfigPath.Store(&userConfigPathResolution{env: env, path: path, err: err, at: now})
+	return path, err
+}
 
 // GetUserConfigPath returns the path to the user config file
 func GetUserConfigPath() (string, error) {
@@ -4621,7 +4648,7 @@ func GetUserConfigPath() (string, error) {
 // editing ~/.agent-deck/config.toml by hand while the TUI is running) are
 // picked up on the next call without a manual ClearUserConfigCache.
 func LoadUserConfig() (*UserConfig, error) {
-	configPath, pathErr := GetUserConfigPath()
+	configPath, pathErr := cachedUserConfigPath()
 
 	// Stat the file once up front so both the fast-path and the slow-path
 	// agree on the same mtime. A missing file is not an error — we fall
@@ -4630,6 +4657,9 @@ func LoadUserConfig() (*UserConfig, error) {
 	if pathErr == nil {
 		if st, err := os.Stat(configPath); err == nil {
 			currentMtime = st.ModTime()
+		} else {
+			// The file may be created at either location before the next call.
+			resolvedUserConfigPath.Store(nil)
 		}
 	}
 
@@ -4955,6 +4985,7 @@ func ClearUserConfigCache() {
 	userConfigCacheMtime = time.Time{}
 	userConfigCacheErr = nil
 	userConfigCacheMu.Unlock()
+	resolvedUserConfigPath.Store(nil)
 }
 
 // IsClaudeCompatible returns true if the tool is "claude" or a custom tool

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -254,6 +255,17 @@ type Storage struct {
 	dbPath  string     // Path to state.db (for change detection)
 	profile string     // The profile this storage is for
 	mu      sync.Mutex // Protects operations during transition
+
+	loadBaselines map[string]loadBaseline
+}
+
+// loadBaseline is the save baseline built for a stored row under a config.
+// Building one is most of a reload's cost and the daemon reloads every
+// 1-3s, so an unchanged row reuses it.
+type loadBaseline struct {
+	stored   *statedb.InstanceRow
+	cfg      *UserConfig
+	original *statedb.InstanceRow
 }
 
 // NewStorageWithProfile creates a storage instance for a specific profile.
@@ -535,6 +547,27 @@ func (i *Instance) ForgetStorageSnapshot() {
 	if i != nil {
 		i.storageSnapshot = nil
 	}
+}
+
+// buildLoadBaseline is a test seam.
+var buildLoadBaseline = instanceToRow
+
+// The returned row is shared with s.loadBaselines; rememberInstanceSnapshot
+// clones it, so nothing mutates it.
+func (s *Storage) reuseOrBuildLoadBaseline(inst *Instance, stored *statedb.InstanceRow, cfg *UserConfig) (*statedb.InstanceRow, error) {
+	if prev, ok := s.loadBaselines[inst.ID]; ok && stored != nil && prev.cfg == cfg && reflect.DeepEqual(prev.stored, stored) {
+		return prev.original, nil
+	}
+	original, err := buildLoadBaseline(inst)
+	if err != nil {
+		return nil, err
+	}
+	if stored != nil && stored.GroupPath == DefaultGroupName {
+		// Known legacy normalization is migration intent, not an incidental
+		// display difference. Commit membership with the group's path move.
+		original.GroupPath = stored.GroupPath
+	}
+	return original, nil
 }
 
 func (s *Storage) rememberInstanceSnapshot(inst *Instance, original, stored *statedb.InstanceRow) {
@@ -1598,25 +1631,27 @@ func (s *Storage) LoadWithGroupsSnapshot() ([]*Instance, []*GroupData, *statedb.
 		storageLog.Warn("ack_read_failed", slog.String("error", ackErr.Error()))
 	}
 
+	// Read before converting: a config reloaded mid-convert then misses next pass.
+	cfg, _ := LoadUserConfig()
 	instances, groups, err := s.convertToInstances(data)
 	if err == nil {
 		byID := make(map[string]*statedb.InstanceRow, len(dbRows))
 		for _, row := range dbRows {
 			byID[row.ID] = row
 		}
+		baselines := make(map[string]loadBaseline, len(instances))
 		for _, inst := range instances {
-			original, convertErr := instanceToRow(inst)
+			stored := byID[inst.ID]
+			original, convertErr := s.reuseOrBuildLoadBaseline(inst, stored, cfg)
 			if convertErr != nil {
 				return nil, nil, nil, convertErr
 			}
-			stored := byID[inst.ID]
-			if stored != nil && stored.GroupPath == DefaultGroupName {
-				// Known legacy normalization is migration intent, not an incidental
-				// display difference. Commit membership with the group's path move.
-				original.GroupPath = stored.GroupPath
+			if stored != nil {
+				baselines[inst.ID] = loadBaseline{stored: statedb.CloneInstanceRow(stored), cfg: cfg, original: original}
 			}
 			s.rememberInstanceSnapshot(inst, original, stored)
 		}
+		s.loadBaselines = baselines
 		groupsByPath := make(map[string]*statedb.GroupRow, len(dbGroups))
 		for _, row := range dbGroups {
 			groupsByPath[row.Path] = row
