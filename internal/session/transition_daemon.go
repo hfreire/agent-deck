@@ -658,6 +658,16 @@ func (d *TransitionDaemon) syncProfile(profile string) time.Duration {
 		nextPriors := make(map[string]liveStatusPrior, len(instances))
 		for _, inst := range instances {
 			previousStatus := normalizeStatusString(string(inst.Status))
+			if inst.StatusFrozenByArchive() {
+				statuses[inst.ID] = previousStatus
+				// The terminated-pane substate is in-memory only, so a reloaded
+				// row has none; keep the journaled one or the journal records a
+				// substate change that never happened.
+				if st, sub, _ := strings.Cut(d.lastJournaled[profile][inst.ID], "|"); st == previousStatus {
+					substates[inst.ID] = sub
+				}
+				continue
+			}
 			// Persisted stop and queue decisions supersede older live samples.
 			// Keep them intact so UpdateStatus can distinguish an intentional
 			// stop or capacity wait from a vanished pane, while detecting starts.
