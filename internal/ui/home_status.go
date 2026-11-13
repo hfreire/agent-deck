@@ -746,17 +746,7 @@ func (h *Home) logWorker() {
 // status; skipping it forever would count it as running in the header pills.
 // It is polled until UpdateStatus settles it on error/stopped, then skipped.
 func shouldPollStatusInLoop(inst *session.Instance) bool {
-	if inst == nil {
-		return false
-	}
-	if !inst.IsArchived() {
-		return true
-	}
-	switch inst.GetStatusThreadSafe() {
-	case session.StatusRunning, session.StatusWaiting, session.StatusIdle, session.StatusStarting:
-		return true
-	}
-	return false
+	return inst != nil && !inst.StatusFrozenByArchive()
 }
 
 const fullStatusBatchSize = 32

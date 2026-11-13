@@ -658,6 +658,10 @@ func (d *TransitionDaemon) syncProfile(profile string) time.Duration {
 		nextPriors := make(map[string]liveStatusPrior, len(instances))
 		for _, inst := range instances {
 			previousStatus := normalizeStatusString(string(inst.Status))
+			if inst.StatusFrozenByArchive() {
+				statuses[inst.ID] = previousStatus
+				continue
+			}
 			// Persisted stop and queue decisions supersede older live samples.
 			// Keep them intact so UpdateStatus can distinguish an intentional
 			// stop or capacity wait from a vanished pane, while detecting starts.

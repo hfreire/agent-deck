@@ -17,6 +17,21 @@ func (i *Instance) IsArchived() bool {
 	return !i.ArchivedAt.IsZero()
 }
 
+// StatusFrozenByArchive reports whether a status poll of inst can be skipped:
+// it is archived and settled. An archived session whose tmux was already gone
+// when it was archived never went through Kill() and may still claim a live
+// status; it stays polled until it settles.
+func (i *Instance) StatusFrozenByArchive() bool {
+	if !i.IsArchived() {
+		return false
+	}
+	switch i.GetStatusThreadSafe() {
+	case StatusRunning, StatusWaiting, StatusIdle, StatusStarting:
+		return false
+	}
+	return true
+}
+
 // ArchivedAtThreadSafe returns ArchivedAt, read under the archive lock.
 func (i *Instance) ArchivedAtThreadSafe() time.Time {
 	i.archiveMu.RLock()
