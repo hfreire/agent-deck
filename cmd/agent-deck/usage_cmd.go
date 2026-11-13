@@ -25,7 +25,7 @@ provider's own numbers.
 
 Options:
   --json      Print the report as JSON
-  --refresh   Fetch pull-based providers (Z.ai) now instead of serving the
+  --refresh   Fetch pull-based providers (Z.ai, Codex) now instead of serving the
               cache. Claude is push-only (see ingest) and is unaffected.
 
 Subcommands:
@@ -73,7 +73,7 @@ func handleUsage(profile string, args []string) {
 	}
 
 	store := openQuotaStore(profile)
-	report := quota.Report{Providers: collectQuota(store, *refresh)}
+	report := quota.Report{Providers: collectQuota(store, session.CodexHomeForProfile(profile), *refresh)}
 
 	if *asJSON {
 		encoded, err := json.MarshalIndent(report, "", "  ")
@@ -124,7 +124,12 @@ func resolveQuotaStore(profile string) (*quota.Store, error) {
 // fetched when its cache is older than the store's staleness bound, or on
 // --refresh. That split is what gives --refresh a real meaning instead of being
 // a flag that sometimes does nothing.
-func collectQuota(store *quota.Store, refresh bool) []quota.Snapshot {
+//
+// Codex sits between the two: its numbers are read from the transcripts Codex
+// itself writes, so there is something to ask but nothing to ask over the
+// network. It is read on the same staleness condition as Z.ai; --refresh only
+// brings that read forward.
+func collectQuota(store *quota.Store, codexHome string, refresh bool) []quota.Snapshot {
 	cached, err := store.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: reading quota cache: %v\n", err)
@@ -147,6 +152,21 @@ func collectQuota(store *quota.Store, refresh bool) []quota.Snapshot {
 			if fetched.Error == "" {
 				if err := store.Save(fetched); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: caching Z.ai quota: %v\n", err)
+				}
+			}
+		}
+	}
+
+	existingCodex, haveCodex := byID[quota.ProviderCodex]
+	if refresh || !haveCodex || existingCodex.Stale {
+		if read, ok := readCodexSnapshot(codexHome, existingCodex, haveCodex); ok {
+			if !haveCodex {
+				order = append(order, quota.ProviderCodex)
+			}
+			byID[quota.ProviderCodex] = store.MarkStale(read, time.Now())
+			if read.Error == "" {
+				if err := store.Save(read); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: caching Codex quota: %v\n", err)
 				}
 			}
 		}
@@ -191,6 +211,35 @@ func fetchZaiSnapshot(cachedSnapshot quota.Snapshot, haveCached bool) (quota.Sna
 		return quota.Snapshot{
 			ID:        quota.ProviderZai,
 			Label:     quota.ProviderLabel(quota.ProviderZai),
+			Error:     err.Error(),
+			UpdatedAt: time.Now().Unix(),
+		}, true
+	}
+}
+
+// readCodexSnapshot reads the newest reading out of Codex's own transcripts.
+//
+// ok is false when Codex is not installed for this account or has never
+// reported a limit — neither is a failure worth a line in the output. A read
+// failure keeps the last known numbers and attaches the error, for the same
+// reason the Z.ai fetch does.
+func readCodexSnapshot(codexHome string, cachedSnapshot quota.Snapshot, haveCached bool) (quota.Snapshot, bool) {
+	read, ok, err := quota.ReadCodex(codexHome)
+	switch {
+	case err == nil && ok:
+		return read, true
+	case err == nil, errors.Is(err, quota.ErrNotConfigured):
+		if haveCached {
+			return cachedSnapshot, true
+		}
+		return quota.Snapshot{}, false
+	case haveCached:
+		cachedSnapshot.Error = err.Error()
+		return cachedSnapshot, true
+	default:
+		return quota.Snapshot{
+			ID:        quota.ProviderCodex,
+			Label:     quota.ProviderLabel(quota.ProviderCodex),
 			Error:     err.Error(),
 			UpdatedAt: time.Now().Unix(),
 		}, true

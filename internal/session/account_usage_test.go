@@ -247,3 +247,33 @@ func TestAccountUsageCache_ExpiredWindowDropped(t *testing.T) {
 		t.Fatalf("after reset: got = %+v, want the live five-hour window kept", got)
 	}
 }
+
+// TestCollectAccountUsage_ListsDefaultSlot pins that the account every host
+// has — the one at ~/.claude, with no profile config_dir binding to name it —
+// is listed too. Its statusLine writes into the "default" profile's quota
+// cache, so dropping it hid the only usage most decks have.
+func TestCollectAccountUsage_ListsDefaultSlot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	newAccountUsageTestHome(t)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatalf("mkdir ~/.claude: %v", err)
+	}
+	now := time.Now()
+	saveClaudeSnapshot(t, "default", quota.Snapshot{
+		Windows:   []quota.Window{{Kind: quota.WindowFiveHour, Label: "5h", UsedPercentage: 42}},
+		UpdatedAt: now.Add(-time.Minute).Unix(),
+	})
+
+	got := CollectAccountUsage(&UserConfig{}, NewAccountUsageCache(), now)
+	if len(got) != 1 {
+		t.Fatalf("got %d slots, want 1: %+v", len(got), got)
+	}
+	if got[0].Name != "default" {
+		t.Fatalf("got name %q, want default", got[0].Name)
+	}
+	if !got[0].Known || !got[0].FiveHour.Known || got[0].FiveHour.Percent != 42 {
+		t.Fatalf("default slot = %+v, want Known usage with FiveHour 42%%", got[0])
+	}
+}
