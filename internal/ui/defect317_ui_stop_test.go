@@ -101,3 +101,25 @@ func TestDefect317_WebStopSavesStoppedOverAConcurrentRunningSampleOfADeadPane(t 
 		t.Fatalf("row status after web stop = %q, want stopped", got)
 	}
 }
+
+func TestDefect317_WebArchiveSavesStoppedOverAConcurrentErrorSample(t *testing.T) {
+	h, storage, target := defect317UIHome(t, "_defect317_webarchive")
+	sample := session.StopAfterKillHook
+	ran := false
+	session.StopAfterKillHook = func(id string) {
+		ran = true
+		sample(id)
+	}
+	if err := (&WebMutator{h: h}).ArchiveSession(target.ID); err != nil {
+		t.Fatalf("web ArchiveSession: %v", err)
+	}
+	if got := defect317RowStatus(t, storage, target.ID); got != string(session.StatusStopped) {
+		t.Fatalf("row status after web archive = %q, want stopped", got)
+	}
+	if !ran {
+		t.Fatal("web archive never wrote stopped after the kill")
+	}
+	if !target.IsArchived() {
+		t.Fatal("session not archived after web archive")
+	}
+}

@@ -322,9 +322,12 @@ func (m *WebMutator) ArchiveSession(id string) error {
 	if inst == nil {
 		return fmt.Errorf("session not found: %s", id)
 	}
+	loaded := session.BeforeStopKill(m.h.storage, id)
 	if err := inst.Kill(); err != nil {
 		return fmt.Errorf("failed to stop session: %w", err)
 	}
+	// Defect 317: the row reads stopped, not the daemon's error sample of this kill.
+	session.WriteStoppedAfterKill(m.h.storage, inst, loaded)
 	m.h.instancesMu.Lock()
 	inst.SetArchivedAtThreadSafe(time.Now().UTC())
 	m.h.instancesMu.Unlock()
