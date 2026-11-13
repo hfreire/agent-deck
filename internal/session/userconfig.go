@@ -4657,6 +4657,9 @@ func LoadUserConfig() (*UserConfig, error) {
 	if pathErr == nil {
 		if st, err := os.Stat(configPath); err == nil {
 			currentMtime = st.ModTime()
+		} else {
+			// The file may be created at either location before the next call.
+			resolvedUserConfigPath.Store(nil)
 		}
 	}
 

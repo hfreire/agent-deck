@@ -182,8 +182,13 @@ func TestLoadUserConfig_ResolvesTheConfigPathAtMostOncePerInterval(t *testing.T)
 		t.Fatalf("default_tool=%q after the interval, want the XDG file", got)
 	}
 
-	t.Setenv("HOME", t.TempDir())
+	newHome := t.TempDir()
+	t.Setenv("HOME", newHome)
 	if got := defaultTool(); got != "" {
 		t.Fatalf("default_tool=%q right after HOME changed, want the new HOME's default", got)
+	}
+	write(filepath.Join(newHome, ".agent-deck", UserConfigFileName), "codex", clock)
+	if got := defaultTool(); got != "codex" {
+		t.Fatalf("default_tool=%q, want a config.toml created where none existed picked up on the next call", got)
 	}
 }
