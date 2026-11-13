@@ -110,9 +110,15 @@ func TestSyncProfile_ArchivedRowsAreNotProbed(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	const journaled = "error|unknown-exit"
+	d.lastJournaled[profile] = map[string]string{"archived-1": journaled}
+
 	runSyncProfileWithDeadline(t, d, profile, 5*time.Second)
 	runSyncProfileWithDeadline(t, d, profile, 5*time.Second)
 
+	if got := d.lastJournaled[profile]["archived-1"]; got != journaled {
+		t.Errorf("frozen archived row journal key=%q, want %q kept (a dropped substate journals a fake status change)", got, journaled)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if probed["live"] == 0 {
