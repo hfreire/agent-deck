@@ -83,6 +83,65 @@ func SendEnvelope(senderID string) string {
 	return sendEnvelopePrefix + strings.TrimSpace(senderID) + "]"
 }
 
+// pastedContentTag opens the wrapper Claude Code stores around a prompt that
+// arrived as a paste (a long `session send --message-file`, issue #3131).
+const pastedContentTag = "<pasted_content"
+
+// unwrapLeadingPastedContent trims text and, when it starts with a
+// <pasted_content …> wrapper, returns what follows the wrapper's opening tag
+// (trimmed). ok is false only for a malformed leading wrapper: a tag name
+// that merely starts with "pasted_content", or an opening tag that never
+// closes on its own line. Text without a leading wrapper comes back trimmed
+// with ok true. The closing tag is left in place; callers only read the
+// first line.
+func unwrapLeadingPastedContent(text string) (inner string, ok bool) {
+	text = strings.TrimSpace(text)
+	rest, found := strings.CutPrefix(text, pastedContentTag)
+	if !found {
+		return text, true
+	}
+	if rest == "" || (rest[0] != '>' && rest[0] != ' ' && rest[0] != '\t') {
+		return "", false
+	}
+	end := strings.IndexByte(rest, '>')
+	if end < 0 || strings.ContainsRune(rest[:end], '\n') {
+		return "", false
+	}
+	return strings.TrimSpace(rest[end+1:]), true
+}
+
+// parseSendEnvelope reports whether a prompt starts with a send envelope and
+// returns the sender. The envelope must be the prompt's first non-empty line,
+// or the first non-empty line inside a LEADING <pasted_content …> wrapper. A
+// wrapper that is not at the start of the prompt, or whose first line is
+// something else, is not a send: a person who pastes text that merely
+// contains an envelope further down is still a human prompt.
+func parseSendEnvelope(text string) (ok bool, fromID string) {
+	text, ok = unwrapLeadingPastedContent(text)
+	if !ok {
+		return false, ""
+	}
+	rest, found := strings.CutPrefix(text, sendEnvelopePrefix)
+	if !found {
+		return false, ""
+	}
+	if end := strings.IndexByte(rest, ']'); end > 0 {
+		return true, strings.TrimSpace(rest[:end])
+	}
+	return true, ""
+}
+
+// PromptSender returns the sender named by a prompt's send envelope, by the
+// same rule the transcript classifier applies (parseSendEnvelope), or "" for
+// a prompt that is not a tagged send. The hook handler records it at prompt
+// time (issue #3131).
+func PromptSender(prompt string) string {
+	if ok, from := parseSendEnvelope(prompt); ok {
+		return from
+	}
+	return ""
+}
+
 // HasSendEnvelope reports whether message already starts with an envelope
 // (a forwarded or re-sent message), so it is never tagged twice.
 func HasSendEnvelope(message string) bool {
@@ -293,16 +352,13 @@ func transcriptTypedCommand(lines []string) bool {
 // classifyTrigger maps the user record that started a turn to a trigger kind.
 func classifyTrigger(rec transcriptTurnRecord) (trigger, fromID string) {
 	text := strings.TrimSpace(transcriptText(rec.Message.Content))
+	isSend, from := parseSendEnvelope(text)
 	switch {
 	case rec.TurnOrigin == "task_notification", rec.Origin.Kind == "task-notification",
 		strings.HasPrefix(text, "<task-notification>"):
 		return TurnTriggerTask, ""
-	case strings.HasPrefix(text, sendEnvelopePrefix):
-		rest := strings.TrimPrefix(text, sendEnvelopePrefix)
-		if end := strings.IndexByte(rest, ']'); end > 0 {
-			return TurnTriggerSend, strings.TrimSpace(rest[:end])
-		}
-		return TurnTriggerSend, ""
+	case isSend:
+		return TurnTriggerSend, from
 	case hasInboxWakePrefix(text), strings.HasPrefix(text, "Stop hook feedback:"):
 		return TurnTriggerInbox, ""
 	case rec.IsMeta, strings.HasPrefix(text, "<system-reminder>"), strings.HasPrefix(text, "<local-command"),
@@ -527,7 +583,46 @@ func instanceTurnFacts(inst *Instance) (TurnFacts, bool) {
 	if err != nil {
 		return TurnFacts{}, false
 	}
+	if facts.Trigger == TurnTriggerUnknown && facts.FromID == "" {
+		// Issue #3131: the turn ran longer than the tail window, so its
+		// prompt was never read. The hook recorded the prompt's sender;
+		// use it only when the turn that just ended is that prompt's turn.
+		if from := hookPromptSenderForEndedTurn(inst.ID); from != "" {
+			facts.Trigger, facts.FromID = TurnTriggerSend, from
+		}
+	}
 	return facts, true
+}
+
+// hookPromptSenderForEndedTurn returns the sender the hook handler recorded
+// for the instance's last tagged prompt (prompt_from_id), but only when
+// exactly one turn edge, the Stop that ended that prompt's turn, has been
+// counted since (turn_seq == prompt_turn_seq + 1). Any other count means the
+// turn being classified may have been started by something else (a task
+// notification, a blocked Stop that went on, a newer prompt), so it returns
+// "" and the turn stays unknown. Both numbers come from one read of one file
+// the handler writes under its status lock.
+func hookPromptSenderForEndedTurn(instanceID string) string {
+	if strings.TrimSpace(instanceID) == "" {
+		return ""
+	}
+	data, err := readStatusFileNoFollow(hookStatusFilePath(instanceID))
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	var raw struct {
+		TurnSeq       uint64 `json:"turn_seq"`
+		PromptFromID  string `json:"prompt_from_id"`
+		PromptTurnSeq uint64 `json:"prompt_turn_seq"`
+	}
+	if json.Unmarshal(data, &raw) != nil {
+		return ""
+	}
+	from := strings.TrimSpace(raw.PromptFromID)
+	if from == "" || raw.PromptTurnSeq == 0 || raw.TurnSeq != raw.PromptTurnSeq+1 {
+		return ""
+	}
+	return from
 }
 
 // ClassifyTranscriptTailForReplay exposes the tail classifier for the
