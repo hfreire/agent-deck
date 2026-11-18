@@ -1270,6 +1270,9 @@ type sendDeliveryResult struct {
 	// held is how long the composer guard waited/worked before the send
 	// (bounded hold plus the final read-only settle check).
 	held time.Duration
+	// blockReason is the send.GuardRefused* cause when delivery was refused
+	// at the composer guard (deliveryComposerBlocked).
+	blockReason string
 	// draftSaved is the operator draft that was cleared from the composer to
 	// make way for the automated send (empty when no clear was needed).
 	draftSaved string
@@ -1377,6 +1380,9 @@ func (r sendDeliveryResult) jsonFields() map[string]interface{} {
 	}
 	if ms := r.held.Milliseconds(); ms > 0 {
 		fields["held_for_composer_ms"] = ms
+	}
+	if r.blockReason != "" {
+		fields["composer_block_reason"] = r.blockReason
 	}
 	if r.draftSaved != "" {
 		fields["saved_draft"] = r.draftSaved
@@ -1545,7 +1551,8 @@ func executeSend(target sendRetryTarget, tool, message string, noWait bool, tun 
 			res.composerResidue = composerResidueNone
 			blocked := describeBlockedComposer(target, fullBody, tun)
 			res.composerHolds, res.residueAge, res.residueSender = blocked.holds, blocked.age, blocked.sender
-			return res, blocked.err
+			res.blockReason = guard.RefusedReason
+			return res, blockedComposerErr(blocked, guard.RefusedReason)
 		}
 		if guard.ComposerEmpty {
 			// Nothing an earlier failed send left is in the input box now.
@@ -1615,6 +1622,26 @@ func composerFullBodyReaderFor(tool string) send.ComposerFullBodyReader {
 		return send.ClaudeComposerFullBody
 	}
 	return nil
+}
+
+// blockedComposerErr keeps blocked's description of the input box when it
+// could name the contents. When it could not, the guard's cause is the only
+// thing that tells the caller what to do: a mid-turn target wants a deferred
+// send, not the immediate retry that a busy session answers with the same
+// refusal every time.
+func blockedComposerErr(blocked blockedComposer, reason string) error {
+	if blocked.holds != "" && blocked.holds != composerHoldsUnreadable {
+		return blocked.err
+	}
+	switch reason {
+	case send.GuardRefusedTargetMidTurn:
+		return errors.New("message not sent: the target is mid-turn, with no input box to read and a pasted-text marker on screen; " +
+			"nothing was typed. Resend with --defer-if-busy to wait for the turn to end instead of retrying now")
+	case send.GuardRefusedPaneUnreadable:
+		return errors.New("message not sent: the target pane could not be captured, so input cannot be authorized; " +
+			"nothing was typed. Check the session is still alive (`agent-deck session list`)")
+	}
+	return blocked.err
 }
 
 // skipClaudeDeliveryVerify reports whether the Claude-tuned post-send delivery
