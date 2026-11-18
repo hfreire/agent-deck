@@ -163,6 +163,49 @@ func (i *Instance) codexExclusions(p *StatusUpdatePass) map[string]bool {
 	return exclude
 }
 
+// codexExclusionsCached reports the IDs other live panes own from ownership
+// evidence that has ALREADY been collected — the pass snapshot, or a cache
+// entry still inside the TTL. It never starts a tmux read, so unlike
+// codexExclusions it is safe to call with i.mu held (#2674). A nil result
+// means ownership is unknown right now and must not reject anything.
+func (i *Instance) codexExclusionsCached(p *StatusUpdatePass) map[string]bool {
+	socket := tmux.DefaultSocketName()
+	ownName := ""
+	if i.tmuxSession != nil {
+		socket = i.tmuxSession.SocketName
+		ownName = i.tmuxSession.TmuxName()
+	}
+	var snapshot codexOwnershipSnapshot
+	if p != nil {
+		p.mu.Lock()
+		snapshot = p.bySocket[socket]
+		p.mu.Unlock()
+	}
+	if snapshot.claims == nil {
+		codexOwnershipCache.Lock()
+		cached := codexOwnershipCache.bySocket[socket]
+		codexOwnershipCache.Unlock()
+		if cached.refreshing == nil && time.Since(cached.at) < codexExclusionTTL {
+			snapshot = cached
+		}
+	}
+	if snapshot.claims == nil {
+		return nil
+	}
+	snapshot.claims.Lock()
+	defer snapshot.claims.Unlock()
+	if snapshot.claims.bySession == nil {
+		return nil
+	}
+	exclude := make(map[string]bool, len(snapshot.claims.bySession))
+	for name, id := range snapshot.claims.bySession {
+		if name != ownName {
+			exclude[id] = true
+		}
+	}
+	return exclude
+}
+
 func (i *Instance) recordCodexOwnership(id string) {
 	if i.tmuxSession == nil || id == "" {
 		return
