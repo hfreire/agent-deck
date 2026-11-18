@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/asheshgoplani/agent-deck/internal/logging"
 	"github.com/asheshgoplani/agent-deck/internal/shellwords"
+	"github.com/asheshgoplani/agent-deck/internal/tmux"
 )
 
 // Registry is the unified, in-memory view of every tool agent-deck knows about:
@@ -86,7 +88,10 @@ func probeInstalled(command string) bool {
 
 // Init builds a Registry from the static built-ins plus the supplied custom
 // tools (typically config.Tools from LoadUserConfig). Custom entries whose name
-// shadows a built-in are dropped with a warning (precedence rule (a)).
+// shadows a built-in are dropped with a warning (precedence rule (a)). Their
+// detection pattern fields are still applied by MergeToolPatterns, so an entry
+// that sets only those is accepted silently, and one that also sets other
+// fields warns that only the patterns are used.
 //
 // Init is the single explicit constructor — tests build registries directly via
 // Init(map[string]ToolDef{...}) rather than poking package globals. It builds an
@@ -120,9 +125,19 @@ func InitFiltered(custom map[string]ToolDef, showOnlyInstalled bool, hiddenTools
 			continue
 		}
 		if _, isBuiltin := r.builtins[name]; isBuiltin {
-			registryLog.Warn("ignored custom tool: name shadows a built-in",
-				"name", name,
-				"hint", "rename your custom tool and set compatible_with = \""+name+"\" instead")
+			applied, ignored := builtinOverrideFields(name, def)
+			switch {
+			case applied && !ignored:
+				// Honored as is, nothing to report.
+			case applied:
+				registryLog.Warn("custom tool for a built-in: only its detection patterns are used, other fields are ignored",
+					"name", name,
+					"hint", "keep only the pattern fields here, and move the rest to a renamed custom tool with compatible_with = \""+name+"\"")
+			default:
+				registryLog.Warn("ignored custom tool: name shadows a built-in",
+					"name", name,
+					"hint", "rename your custom tool and set compatible_with = \""+name+"\" instead")
+			}
 			continue
 		}
 		r.custom[name] = def
@@ -139,6 +154,21 @@ func InitFiltered(custom map[string]ToolDef, showOnlyInstalled bool, hiddenTools
 		r.runInstalledProbe()
 	}
 	return r
+}
+
+// builtinOverrideFields splits a [tools.<builtin>] entry into what is used and
+// what is not. applied is true when the entry sets detection pattern fields and
+// the built-in has pattern defaults, which is when MergeToolPatterns applies
+// them. ignored is true when the entry sets any other field, which the built-in
+// never takes. A built-in without pattern defaults gets no merge, so its pattern
+// fields count as neither.
+func builtinOverrideFields(name string, def ToolDef) (applied, ignored bool) {
+	rest := def
+	rest.BusyPatterns, rest.PromptPatterns, rest.SpinnerChars = nil, nil, nil
+	rest.BusyPatternsExtra, rest.PromptPatternsExtra, rest.SpinnerCharsExtra = nil, nil, nil
+	applied = tmux.DefaultRawPatterns(name) != nil && !reflect.DeepEqual(def, rest)
+	ignored = !reflect.DeepEqual(rest, ToolDef{})
+	return applied, ignored
 }
 
 // runInstalledProbe resolves every registered tool's command against the host
