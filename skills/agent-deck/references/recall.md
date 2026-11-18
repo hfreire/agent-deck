@@ -140,11 +140,15 @@ agent-deck recall timeline <session> --json --since <cursor>         # only what
 agent-deck recall follow <session> --after <cursor|end> --jsonl      # stream new turns as JSONL frames (--status adds status frames)
 ```
 
-Both read the native transcript directly (Claude or Codex), whatever the
+Both read the native transcript directly (Claude, Codex or Pi), whatever the
 index state; `--agent <id>` picks one Claude sub-agent sidechain and
-`--transcript <file> --harness claude|codex` reads a file instead of a
+`--transcript <file> --harness claude|codex|pi` reads a file instead of a
 session. Frames: `row`, `update`, `remove`, `status`, `delivery`,
 `resync_required`.
+
+`agent-deck web` serves the same timeline over HTTP at
+`GET /api/sessions/{id}/timeline` (parameters `tail`, `limit`, `since`,
+`before`, `agent`); see `docs/recall-timeline.md`.
 
 ### Continue one: `recall open`
 

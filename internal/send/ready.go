@@ -63,17 +63,26 @@ func WaitForAgentReady(target AgentReadyChecker, tool string, timeout time.Durat
 	if timeout <= 0 {
 		timeout = DefaultAgentReadyTimeout
 	}
-	maxAttempts := int(timeout / pollInterval)
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
+	// Wall-clock, not timeout/pollInterval attempts. Every iteration also
+	// costs a GetStatus and up to one CapturePaneFresh — tmux round trips
+	// capped at 3s each, and far slower than the 200ms poll whenever the
+	// server is contended. Budgeting by attempt count made `timeout` a FLOOR:
+	// a 10m budget against a busy pane blocked past 40m with no error, which
+	// is indistinguishable from a slow success to the caller.
+	deadline := time.Now().Add(timeout)
 
 	sawActive := false
 	readyCount := 0
 	startupPromptSeen := 0
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		time.Sleep(pollInterval)
+	for attempt := 0; time.Now().Before(deadline); attempt++ {
+		sleepFor := pollInterval
+		if remaining := time.Until(deadline); remaining < sleepFor {
+			sleepFor = remaining
+		}
+		if sleepFor > 0 {
+			time.Sleep(sleepFor)
+		}
 
 		status, err := target.GetStatus()
 		if err != nil {
