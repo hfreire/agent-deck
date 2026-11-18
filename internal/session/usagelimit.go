@@ -705,3 +705,38 @@ func (i *Instance) transcriptLimit() limitVerdict {
 
 	return verdict
 }
+
+// RefreshUsageLimit re-forms this instance's transcript limit verdict, subject
+// to the same usageLimitScanInterval throttle as every other caller.
+//
+// Exported so the status poll can keep the memo warm off the render path. That
+// is what makes CachedSubstate able to report a limit at all: the verdict costs
+// transcript I/O, which the render path must never pay, so somebody has to pay
+// it on the polling goroutine instead.
+func (i *Instance) RefreshUsageLimit() {
+	_ = i.transcriptLimit()
+}
+
+// cachedLimitSubstate reports the memoised limit verdict WITHOUT touching the
+// filesystem, for the render/cached-status path.
+//
+// Two bounds, both load-bearing:
+//
+//   - The three-way identity invariant (usageLimitVerdictForLocked), so a verdict
+//     formed for a previous conversation on this Instance is never inherited.
+//   - Freshness. The memo only moves while something polls this session, and a
+//     session that stops being polled would otherwise keep asserting a spent
+//     window forever. usageLimitMaxAge is the same bound Substate applies to the
+//     rejection itself, so the cached answer decays no slower than the live one.
+func (i *Instance) cachedLimitSubstate() Substate {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	sessionID := strings.TrimSpace(i.ClaudeSessionID)
+	if sessionID == "" {
+		return SubstateNone
+	}
+	if i.lastUsageLimitScanAt.IsZero() || time.Since(i.lastUsageLimitScanAt) > usageLimitMaxAge {
+		return SubstateNone
+	}
+	return i.usageLimitVerdictForLocked(sessionID).Kind
+}
