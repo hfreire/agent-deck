@@ -112,6 +112,10 @@ type ComposerGuardOptions struct {
 	// TUI, with ComposerDraft's contract. nil means ComposerDraft (Claude);
 	// Codex targets pass CodexComposerDraft (issue #2536).
 	Draft ComposerDraftReader
+	// FullBody, when non-nil, reads the composer's whole body; it decides
+	// ComposerGuardResult.ComposerEmpty (a draft reader may stop at the
+	// first paragraph). nil means ComposerEmpty follows Draft.
+	FullBody ComposerFullBodyReader
 }
 
 // ComposerDraftReader extracts the operator draft from a raw (ANSI-bearing)
@@ -125,6 +129,11 @@ type ComposerGuardResult struct {
 	// Refused means the composer remains occupied or could not be captured.
 	// Callers must return without typing or pressing Enter.
 	Refused bool
+	// RefusedReason is one of the GuardRefused* constants, set only when
+	// Refused. The three causes need three different responses from the
+	// caller, and a single "occupied or unreadable" message left automation
+	// with nothing to do but retry the same losing send.
+	RefusedReason string
 	// Legacy delivery metadata remains zero: operator input is preserved in
 	// place, never saved, cleared, or restored by automated delivery.
 	SavedDraft   string
@@ -146,6 +155,42 @@ type ComposerGuardResult struct {
 	// that the composer now holds that message rather than the suggestion
 	// (TypedComposerCheck).
 	SuggestionShown bool
+	// ComposerEmpty is true when the guard's last successful capture showed
+	// a VISIBLE composer holding no draft (a prompt suggestion or Claude's
+	// placeholder counts as empty), read through ComposerGuardOptions.FullBody
+	// when set. It is the provenance ObserveComposer needs before it may
+	// call a leftover verified (text in the input box after the send that
+	// matches what we typed is then ours), and it expires the leftover
+	// record. False for an unscopable pane.
+	ComposerEmpty bool
+}
+
+// Refusal causes reported in ComposerGuardResult.RefusedReason.
+const (
+	// GuardRefusedOperatorDraft: a human's unsent text is in the composer.
+	// Retrying helps only once they submit or clear it.
+	GuardRefusedOperatorDraft = "operator_draft"
+	// GuardRefusedTargetMidTurn: no composer is introspectable (the target is
+	// mid-generation, or is a tool that renders none) AND a "[Pasted text …]"
+	// marker is parked in the pane, so provenance for a later Enter cannot be
+	// established. The fix is to wait for the turn to end — `session send
+	// --defer-if-busy` does exactly that — not to retry immediately.
+	GuardRefusedTargetMidTurn = "target_mid_turn"
+	// GuardRefusedPaneUnreadable: the pane capture itself failed. An
+	// unreadable pane cannot authorize input at all.
+	GuardRefusedPaneUnreadable = "pane_unreadable"
+)
+
+// refusalReason classifies why provenance could not be established, from the
+// last observation the guard managed to make.
+func refusalReason(raw string, captureOK bool, strip func(string) string) string {
+	if !captureOK {
+		return GuardRefusedPaneUnreadable
+	}
+	if draft, visible := ComposerDraft(raw, strip); visible && draft != "" {
+		return GuardRefusedOperatorDraft
+	}
+	return GuardRefusedTargetMidTurn
 }
 
 // saveReconfirmDelay is the settle time before the save-step re-capture. A
@@ -202,10 +247,10 @@ func GuardComposerDraft(t ComposerGuardTarget, opts ComposerGuardOptions) Compos
 		raw, err := t.CapturePaneFresh()
 		if err != nil {
 			// An unreadable pane cannot authorize input.
-			return ComposerGuardResult{Held: time.Since(start), Refused: true}
+			return ComposerGuardResult{Held: time.Since(start), Refused: true, RefusedReason: GuardRefusedPaneUnreadable}
 		}
 		if composerProvenanceFree(raw, strip, read) {
-			return clearComposerResult(start, raw)
+			return clearComposerResult(start, raw, strip, read, opts.FullBody)
 		}
 		if !time.Now().Before(deadline) {
 			break
@@ -224,12 +269,27 @@ func GuardComposerDraft(t ComposerGuardTarget, opts ComposerGuardOptions) Compos
 	time.Sleep(saveReconfirmDelay)
 	raw, err := t.CapturePaneFresh()
 	if err == nil && composerProvenanceFree(raw, strip, read) {
-		return clearComposerResult(start, raw)
+		return clearComposerResult(start, raw, strip, read, opts.FullBody)
 	}
-	return ComposerGuardResult{Held: time.Since(start), Refused: true}
+	return ComposerGuardResult{
+		Held:          time.Since(start),
+		Refused:       true,
+		RefusedReason: refusalReason(raw, err == nil, strip),
+	}
 }
 
 // clearComposerResult is GuardComposerDraft's go-ahead for the capture raw.
-func clearComposerResult(start time.Time, raw string) ComposerGuardResult {
-	return ComposerGuardResult{Held: time.Since(start), ComposerPasteMarkerFree: true, SuggestionShown: ComposerBodyIsSuggestion(raw)}
+func clearComposerResult(start time.Time, raw string, strip func(string) string, read ComposerDraftReader, full ComposerFullBodyReader) ComposerGuardResult {
+	draft, visible := read(raw, strip)
+	empty := visible && draft == ""
+	if full != nil {
+		body, ok := full(raw, strip)
+		empty = ok && FullBodyEmpty(body)
+	}
+	return ComposerGuardResult{
+		Held:                    time.Since(start),
+		ComposerPasteMarkerFree: true,
+		SuggestionShown:         ComposerBodyIsSuggestion(raw),
+		ComposerEmpty:           empty,
+	}
 }

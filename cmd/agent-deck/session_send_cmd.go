@@ -441,10 +441,8 @@ func handleSessionSend(profile string, args []string) {
 				readyBudget = send.DefaultAgentReadyTimeout
 			}
 			var readyErr error
-			acceptanceGuard, readyErr, guardErr = acquireCodexAcceptanceWhenReady(
-				time.Now().Add(readyBudget), codexAcceptanceLockWait(*timeout), waitReady,
-				inst.LatestCodexTurnGeneration,
-				func(d time.Duration) (*codexAcceptanceGuard, error) { return acquireCodexAcceptanceGuard(inst, d) },
+			acceptanceGuard, readyErr, guardErr = acquireCodexAcceptanceForSend(
+				inst, time.Now().Add(readyBudget), codexAcceptanceLockWait(*timeout), waitReady,
 			)
 			if readyErr != nil {
 				failReady(readyErr)
@@ -574,6 +572,9 @@ func handleSessionSend(profile string, args []string) {
 	// Both modes run the composer-draft guard (issue #1409) and submit
 	// verification with a machine-checkable delivery status (issue #1413).
 	tun := sendTuning(*noWait, *requireInputPrompt)
+	// Named as the origin if this send's text is ever left in the target's
+	// input box (see describeBlockedComposer).
+	tun.residueSender = residueSenderFor(senderID, *noTag, *queueWorker)
 	if *queueWorker || busyAcceptsInput {
 		// A live Claude composer already exists. Startup preflight and the
 		// 30-check idle-turn probe add delay without proving this queued send.
@@ -1269,6 +1270,9 @@ type sendDeliveryResult struct {
 	// held is how long the composer guard waited/worked before the send
 	// (bounded hold plus the final read-only settle check).
 	held time.Duration
+	// blockReason is the send.GuardRefused* cause when delivery was refused
+	// at the composer guard (deliveryComposerBlocked).
+	blockReason string
 	// draftSaved is the operator draft that was cleared from the composer to
 	// make way for the automated send (empty when no clear was needed).
 	draftSaved string
@@ -1308,6 +1312,21 @@ type sendDeliveryResult struct {
 	// both make --wait decline to wait, but only one of them is a fact about
 	// the target (round-2 review of #2100).
 	busyProbeFailed bool
+
+	// composerResidue is what this send left in the target's input box:
+	// "" (unknown or not applicable), composerResidueNone,
+	// composerResidueLeft or composerResidueAbsent. --json composer_residue.
+	composerResidue string
+	// residueVerified (composerResidue left only): what is left was verified
+	// as only this send's own text. --json composer_residue_verified.
+	residueVerified bool
+	// composerHolds (composer_blocked only) is what the input box holds
+	// (composerHolds*); residueAge and residueSender describe agent-deck's
+	// recorded leftover when there is one. --json composer_holds,
+	// residue_age_seconds, residue_sender.
+	composerHolds string
+	residueAge    time.Duration
+	residueSender string
 }
 
 func completionTimeoutPayload(data map[string]interface{}) map[string]interface{} {
@@ -1362,6 +1381,9 @@ func (r sendDeliveryResult) jsonFields() map[string]interface{} {
 	if ms := r.held.Milliseconds(); ms > 0 {
 		fields["held_for_composer_ms"] = ms
 	}
+	if r.blockReason != "" {
+		fields["composer_block_reason"] = r.blockReason
+	}
 	if r.draftSaved != "" {
 		fields["saved_draft"] = r.draftSaved
 		fields["draft_restored"] = r.draftRestored
@@ -1377,6 +1399,21 @@ func (r sendDeliveryResult) jsonFields() map[string]interface{} {
 	}
 	if r.socketMsgID != "" {
 		fields["msg_id"] = r.socketMsgID
+	}
+	if r.composerResidue != "" {
+		fields["composer_residue"] = r.composerResidue
+		if r.composerResidue == composerResidueLeft {
+			fields["composer_residue_verified"] = r.residueVerified
+		}
+	}
+	if r.composerHolds != "" {
+		fields["composer_holds"] = r.composerHolds
+		if r.composerHolds == composerHoldsAgentDeckResidue || r.composerHolds == composerHoldsAgentDeckResidueUnverified || r.composerHolds == composerHoldsUnknownText {
+			fields["residue_age_seconds"] = int64(r.residueAge / time.Second)
+		}
+		if r.residueSender != "" {
+			fields["residue_sender"] = r.residueSender
+		}
 	}
 	return fields
 }
@@ -1400,6 +1437,14 @@ type sendExecTuning struct {
 	settleDelay time.Duration
 	// retry is the verification-loop budget (issues #876, #1413).
 	retry sendRetryOptions
+	// residue, when non-nil, records (hash only) text a failed send left in
+	// the target's input box, so a later refusal can say whose it is.
+	// targetID keys it (the target instance id); residueSender is recorded
+	// as the leftover's origin. nil disables both. It never authorises a
+	// key press.
+	residue       sendResidueStore
+	targetID      string
+	residueSender string
 }
 
 func sendTuning(noWait, requireInputPrompt bool) sendExecTuning {
@@ -1481,23 +1526,40 @@ func executeSend(target sendRetryTarget, tool, message string, noWait bool, tun 
 		if err := guard.beforeBatch(); err != nil {
 			res.delivery, err = guard.refusal()
 			res.untyped = guard.typedBatches == 0
+			if res.untyped {
+				res.composerResidue = composerResidueNone
+			}
 			return res, err
 		}
 	}
 
 	if draftReader, guarded := composerDraftReaderFor(tool); guarded {
+		fullBody := composerFullBodyReaderFor(tool)
 		guard := send.GuardComposerDraft(target, send.ComposerGuardOptions{
 			HoldWait:     tun.guardHold,
 			PollInterval: tun.guardPoll,
 			ClearWait:    tun.guardClearWait,
 			Strip:        tmux.StripANSI,
 			Draft:        draftReader,
+			FullBody:     fullBody,
 		})
 		res.held = guard.Held
 		if guard.Refused {
+			// Nothing was typed. Say what the input box holds; never touch
+			// it (no key is sent on this path).
 			res.delivery = deliveryComposerBlocked
-			return res, fmt.Errorf("message not sent: composer is occupied or unreadable; existing draft preserved")
+			res.composerResidue = composerResidueNone
+			blocked := describeBlockedComposer(target, fullBody, tun)
+			res.composerHolds, res.residueAge, res.residueSender = blocked.holds, blocked.age, blocked.sender
+			res.blockReason = guard.RefusedReason
+			return res, blockedComposerErr(blocked, guard.RefusedReason)
 		}
+		if guard.ComposerEmpty {
+			// Nothing an earlier failed send left is in the input box now.
+			clearResidue(tun)
+		}
+		tun.retry.composerEmptyBeforeSend = guard.ComposerEmpty
+		tun.retry.composerBody = fullBody
 		if claudeLike {
 			// Provenance for the #1777 attribution gate, taken from the
 			// capture the guard already made just before we type: with no
@@ -1520,6 +1582,12 @@ func executeSend(target sendRetryTarget, tool, message string, noWait bool, tun 
 	}
 	delivery, err := sendWithRetryTarget(target, message, skipClaudeDeliveryVerify(tool), tun.retry)
 	res.delivery = delivery
+	var residue *composerResidueError
+	if errors.As(err, &residue) {
+		res.composerResidue = residue.residue
+		res.residueVerified = residue.residue == composerResidueLeft && residue.observed.Verified
+		recordResidue(tun, message, residue)
+	}
 	if guard := tun.retry.promptGuard; guard != nil && guard.refused && guard.typedBatches == 0 {
 		res.untyped = true
 	}
@@ -1542,6 +1610,38 @@ func composerDraftReaderFor(tool string) (send.ComposerDraftReader, bool) {
 		return send.CodexComposerDraft, true
 	}
 	return nil, false
+}
+
+// composerFullBodyReaderFor returns the reader for tool's WHOLE input box,
+// or nil. It is only read, to report what a send that could not submit left
+// there (send.ObserveComposer); a tool without one (Codex, pi, everything
+// else) gets no composer_residue after typing (unknown). Codex gets one once
+// its composer can be read row for row.
+func composerFullBodyReaderFor(tool string) send.ComposerFullBodyReader {
+	if session.IsClaudeCompatible(tool) {
+		return send.ClaudeComposerFullBody
+	}
+	return nil
+}
+
+// blockedComposerErr keeps blocked's description of the input box when it
+// could name the contents. When it could not, the guard's cause is the only
+// thing that tells the caller what to do: a mid-turn target wants a deferred
+// send, not the immediate retry that a busy session answers with the same
+// refusal every time.
+func blockedComposerErr(blocked blockedComposer, reason string) error {
+	if blocked.holds != "" && blocked.holds != composerHoldsUnreadable {
+		return blocked.err
+	}
+	switch reason {
+	case send.GuardRefusedTargetMidTurn:
+		return errors.New("message not sent: the target is mid-turn, with no input box to read and a pasted-text marker on screen; " +
+			"nothing was typed. Resend with --defer-if-busy to wait for the turn to end instead of retrying now")
+	case send.GuardRefusedPaneUnreadable:
+		return errors.New("message not sent: the target pane could not be captured, so input cannot be authorized; " +
+			"nothing was typed. Check the session is still alive (`agent-deck session list`)")
+	}
+	return blocked.err
 }
 
 // skipClaudeDeliveryVerify reports whether the Claude-tuned post-send delivery

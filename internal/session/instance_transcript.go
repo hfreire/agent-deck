@@ -101,12 +101,17 @@ func (i *Instance) codexRolloutTail() ([]string, error) {
 	return TranscriptTailLines(path, 50)
 }
 
-// scanCodexRolloutBackward offers the rollout's records to visit, newest
-// first, until visit reports it is done. The byte window widens up to
-// codexTurnGenerationScanMaxBytes; each wider pass starts again from the
+// scanCodexRolloutBackwardBounded offers the rollout's records to visit,
+// newest first, until visit reports it is done. The byte window starts at
+// initial and widens up to maxScan; each wider pass starts again from the
 // newest record, so newVisit returns a fresh visitor for every pass. It
-// reports whether a visitor finished.
-func scanCodexRolloutBackward(path string, newVisit func() func(codexRolloutRecord) bool) (bool, error) {
+// reports whether a visitor finished. The ceiling is explicit because some
+// callers need a wider finite read than the default
+// (codexTurnGenerationScanMaxBytes; see codexAcceptanceGeneration in the CLI: a turn that has
+// been emitting output for an hour pushes its own turn-start record many MiB
+// back from EOF, and the default ceiling then reports "no turn" instead of the
+// real newest turn).
+func scanCodexRolloutBackwardBounded(path string, initial, maxScan int64, newVisit func() func(codexRolloutRecord) bool) (bool, error) {
 	f, err := os.Open(path) // #nosec G304 -- codexRolloutPath resolves one exact, non-symlink rollout
 	if err != nil {
 		return false, err
@@ -121,7 +126,13 @@ func scanCodexRolloutBackward(path string, newVisit func() func(codexRolloutReco
 	if size == 0 {
 		return false, nil
 	}
-	scanBytes := min(size, codexTurnGenerationInitialScanBytes)
+	if initial <= 0 {
+		initial = codexTurnGenerationInitialScanBytes
+	}
+	if maxScan < initial {
+		maxScan = initial
+	}
+	scanBytes := min(size, initial)
 	for {
 		offset := size - scanBytes
 		data := make([]byte, int(scanBytes))
@@ -167,10 +178,10 @@ func scanCodexRolloutBackward(path string, newVisit func() func(codexRolloutReco
 			}
 		}
 
-		if offset == 0 || scanBytes == codexTurnGenerationScanMaxBytes {
+		if offset == 0 || scanBytes == maxScan {
 			return false, nil
 		}
-		scanBytes = min(size, min(scanBytes*2, codexTurnGenerationScanMaxBytes))
+		scanBytes = min(size, min(scanBytes*2, maxScan))
 	}
 }
 
@@ -180,8 +191,17 @@ func isCodexTurnStart(record codexRolloutRecord) bool {
 }
 
 func latestCodexTurnIDFromRollout(path string) (string, error) {
+	return latestCodexTurnIDFromRolloutWithin(path, codexTurnGenerationScanMaxBytes)
+}
+
+// latestCodexTurnIDFromRolloutWithin is latestCodexTurnIDFromRollout with an
+// explicit backward-scan ceiling. An empty result with a nil error means "no
+// turn start was found within the ceiling", which callers must treat as
+// UNKNOWABLE rather than as "this thread has no turn": see
+// ReconcileCodexSubmissionMarker.
+func latestCodexTurnIDFromRolloutWithin(path string, maxScan int64) (string, error) {
 	turnID := ""
-	_, err := scanCodexRolloutBackward(path, func() func(codexRolloutRecord) bool {
+	_, err := scanCodexRolloutBackwardBounded(path, codexTurnGenerationInitialScanBytes, maxScan, func() func(codexRolloutRecord) bool {
 		return func(record codexRolloutRecord) bool {
 			if !isCodexTurnStart(record) {
 				return false
@@ -217,8 +237,16 @@ func codexUserInputEncoding(record codexRolloutRecord) string {
 // record types, turn ids and timestamps are read. A turn start beyond the
 // scan window, or a newer turn, reports false.
 func codexTurnTookInputSinceFromRollout(path, turnID string, since time.Time) (bool, error) {
+	return codexTurnTookInputSinceFromRolloutWithin(path, turnID, since, codexTurnGenerationScanMaxBytes)
+}
+
+// codexTurnTookInputSinceFromRolloutWithin is codexTurnTookInputSinceFromRollout
+// with an explicit backward-scan ceiling. A caller that located turnID with a
+// wider ceiling must read its inputs with the same one: the turn start sits
+// just as far back, and a narrower window never reaches it and reports false.
+func codexTurnTookInputSinceFromRolloutWithin(path, turnID string, since time.Time, maxScan int64) (bool, error) {
 	took := false
-	_, err := scanCodexRolloutBackward(path, func() func(codexRolloutRecord) bool {
+	_, err := scanCodexRolloutBackwardBounded(path, codexTurnGenerationInitialScanBytes, maxScan, func() func(codexRolloutRecord) bool {
 		// Newest first: the last time kept per encoding is the opening input.
 		inputs := map[string][]time.Time{}
 		return func(record codexRolloutRecord) bool {
@@ -280,13 +308,29 @@ func parseCodexLastAssistantMessage(lines []string, sessionID string) (*Response
 }
 
 // LatestCodexTurnGeneration returns the newest durable turn-start identity in
-// the exact rollout bound to this instance. It never derives identity from
-// prompt or response content.
+// the exact rollout bound to this instance, as
+// "<codex session id>:<turn id>". It never derives identity from prompt or
+// response content.
 //
 // A thread the pane's live Codex process owns but has not yet written a
 // rollout for (fresh composer, no turn started) has no turn generation yet, so
-// it reports "" without error, like an empty rollout.
+// it reports "" without error, like an empty rollout. The same "" also comes
+// back when the newest turn start sits beyond the default backward ceiling —
+// a turn that has been emitting output for a long time pushes its own
+// turn-start record far from EOF — so callers that must not confuse the two
+// use LatestCodexTurnGenerationWithBudget.
 func (i *Instance) LatestCodexTurnGeneration() (string, error) {
+	return i.LatestCodexTurnGenerationWithBudget(codexTurnGenerationScanMaxBytes)
+}
+
+// LatestCodexTurnGenerationWithBudget is LatestCodexTurnGeneration with an
+// explicit backward-scan ceiling, for callers that must not mistake a
+// long-running turn (whose own turn-start record can be many MiB from EOF) for
+// a thread with no turn at all. A non-positive budget keeps the default.
+func (i *Instance) LatestCodexTurnGenerationWithBudget(maxScanBytes int64) (string, error) {
+	if maxScanBytes <= 0 {
+		maxScanBytes = codexTurnGenerationScanMaxBytes
+	}
 	path, err := i.codexRolloutPath()
 	if errors.Is(err, errNoExactContextArtifact) && i.LiveCodexThreadID() == i.CodexSessionID {
 		return "", nil
@@ -294,7 +338,7 @@ func (i *Instance) LatestCodexTurnGeneration() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	turnID, err := latestCodexTurnIDFromRollout(path)
+	turnID, err := latestCodexTurnIDFromRolloutWithin(path, maxScanBytes)
 	if err != nil || turnID == "" {
 		return "", err
 	}
@@ -306,6 +350,19 @@ func (i *Instance) LatestCodexTurnGeneration() (string, error) {
 // input recorded at or after since, beyond its opening input. Like
 // LatestCodexTurnGeneration it never reads prompt or response content.
 func (i *Instance) CodexTurnTookInputSince(generation string, since time.Time) (bool, error) {
+	return i.CodexTurnTookInputSinceWithBudget(generation, since, codexTurnGenerationScanMaxBytes)
+}
+
+// CodexTurnTookInputSinceWithBudget is CodexTurnTookInputSince with an explicit
+// backward-scan ceiling. A caller that read generation with
+// LatestCodexTurnGenerationWithBudget passes the same budget here: a running
+// turn whose start is beyond the default ceiling is otherwise found by the
+// one reader and reported as taking no input by the other. A non-positive
+// budget keeps the default.
+func (i *Instance) CodexTurnTookInputSinceWithBudget(generation string, since time.Time, maxScanBytes int64) (bool, error) {
+	if maxScanBytes <= 0 {
+		maxScanBytes = codexTurnGenerationScanMaxBytes
+	}
 	turnID, found := strings.CutPrefix(generation, i.CodexSessionID+":")
 	if i.CodexSessionID == "" || !found || turnID == "" {
 		return false, nil
@@ -314,7 +371,7 @@ func (i *Instance) CodexTurnTookInputSince(generation string, since time.Time) (
 	if err != nil {
 		return false, err
 	}
-	return codexTurnTookInputSinceFromRollout(path, turnID, since)
+	return codexTurnTookInputSinceFromRolloutWithin(path, turnID, since, maxScanBytes)
 }
 
 // GetLastResponseBestEffortChecked is the collision-aware variant of
@@ -1047,6 +1104,28 @@ func ResolveClaudeTranscriptPath(configDir, projectPath, sessionID string, addit
 	return resolveClaudeTranscriptPath(configDir, projectPath, sessionID, additionalPaths...)
 }
 
+// claudeReaderConfigDirs lists the Claude config dirs the last-response
+// readers (getClaudeLastResponse, findLatestClaudeTranscriptOnDisk) may read,
+// in order: the instance's own dir (account/conductor/group), the same
+// resolution GetJSONLPath and LiveTranscriptPath use, then the process-wide
+// dir for transcripts written before a group/conductor dir change.
+//
+// A session on an account slot gets ONLY its own dir: a wrong transcript is
+// worse than none, so it must never be answered from the default dir or
+// another slot (the caller then falls back to the pane). Sessions without a
+// slot keep today's process-wide dir as a fallback.
+func (i *Instance) claudeReaderConfigDirs() []string {
+	own := GetClaudeConfigDirForInstance(i)
+	global := GetClaudeConfigDir()
+	if own == "" {
+		own = global
+	}
+	if i.Account != "" || global == "" || filepath.Clean(own) == filepath.Clean(global) {
+		return []string{own}
+	}
+	return []string{own, global}
+}
+
 // getClaudeLastResponse extracts the last assistant message from Claude's JSONL file
 func (i *Instance) getClaudeLastResponse() (*ResponseOutput, error) {
 	// Require stored session ID - no fallback to file scanning
@@ -1060,7 +1139,15 @@ func (i *Instance) getClaudeLastResponse() (*ResponseOutput, error) {
 		return nil, fmt.Errorf("instance %s runs on %s; its Claude transcript is not on this machine", i.ID, i.SSHHost)
 	}
 
-	sessionFile := resolveClaudeTranscriptPath(GetClaudeConfigDir(), i.ProjectPath, i.ClaudeSessionID, i.EffectiveWorkingDir())
+	// A slot session whose transcript is missing must fail here (so the caller
+	// falls back) and never be answered from another dir; see
+	// claudeReaderConfigDirs.
+	sessionFile := ""
+	for _, dir := range i.claudeReaderConfigDirs() {
+		if sessionFile = resolveClaudeTranscriptPath(dir, i.ProjectPath, i.ClaudeSessionID, i.EffectiveWorkingDir()); sessionFile != "" {
+			break
+		}
+	}
 	if sessionFile == "" {
 		return nil, fmt.Errorf("session file not found for claude_session_id %s", i.ClaudeSessionID)
 	}
@@ -1099,8 +1186,17 @@ func (i *Instance) findLatestClaudeTranscriptOnDisk() (string, *ResponseOutput) 
 	if !i.TranscriptIsResolvableLocally() {
 		return "", nil
 	}
+	for _, dir := range i.claudeReaderConfigDirs() {
+		if id, resp := i.findLatestClaudeTranscriptInDir(dir); resp != nil {
+			return id, resp
+		}
+	}
+	return "", nil
+}
 
-	configDir := GetClaudeConfigDir()
+// findLatestClaudeTranscriptInDir is the scan of findLatestClaudeTranscriptOnDisk
+// against one config dir.
+func (i *Instance) findLatestClaudeTranscriptInDir(configDir string) (string, *ResponseOutput) {
 
 	resolvedPath := i.ProjectPath
 	if resolved, err := filepath.EvalSymlinks(i.ProjectPath); err == nil {
