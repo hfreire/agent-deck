@@ -340,3 +340,39 @@ func TestSessionDataService_LoadMenuSnapshotIncludesDescendantsForCollapsedGroup
 		t.Fatalf("unexpected fourth item: %+v", snapshot.Items[3])
 	}
 }
+
+// TestSessionDataService_LoadMenuSnapshotRefreshesOnlyActive pins that the
+// live-state pass is handed only the sessions the snapshot will contain.
+// Each refreshed session costs tmux subprocesses, and archived ones are
+// filtered out of the result anyway, so refreshing them is pure cost — on a
+// deck with hundreds of archived sessions it is what makes the menu endpoints
+// time out.
+func TestSessionDataService_LoadMenuSnapshotRefreshesOnlyActive(t *testing.T) {
+	active := session.NewInstanceWithGroupAndTool("active", "/tmp/active", "", "shell")
+	active.ID = "sess-active"
+	archived := session.NewInstanceWithGroupAndTool("archived", "/tmp/archived", "", "shell")
+	archived.ID = "sess-archived"
+	archived.SetArchivedAtThreadSafe(time.Now())
+
+	var refreshed []string
+	svc := &SessionDataService{
+		profile: "test-profile",
+		openStorage: func(string) (storageLoader, error) {
+			return &fakeStorage{instances: []*session.Instance{active, archived}}, nil
+		},
+		now:              time.Now,
+		refreshLiveState: true,
+		refreshStatusesFor: func(instances []*session.Instance) {
+			for _, inst := range instances {
+				refreshed = append(refreshed, inst.ID)
+			}
+		},
+	}
+
+	if _, err := svc.LoadMenuSnapshot(); err != nil {
+		t.Fatalf("LoadMenuSnapshot() error = %v", err)
+	}
+	if len(refreshed) != 1 || refreshed[0] != "sess-active" {
+		t.Fatalf("refreshed %v, want only [sess-active]", refreshed)
+	}
+}
