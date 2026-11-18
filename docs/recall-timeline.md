@@ -49,19 +49,28 @@ of the background index sweep and meets the two second local append target.
 ```
 agent-deck recall timeline <session> --json [--since <cursor> | --before <cursor> --limit N] [--limit N] [--tail N] [--agent <id>]
 agent-deck recall follow   <session> --after <cursor|end> --jsonl [--status]
-agent-deck recall timeline --json --transcript <file> --harness claude|codex
+agent-deck recall timeline --json --transcript <file> --harness claude|codex|pi
 agent-deck recall timeline --json [--tail N] --sessions <id1>,<id2>,...
 ```
 
 Both need `[recall] enabled = true` (exit 2 otherwise) but never need the
 index: `<session>` resolves, without touching recall.db, as a deck session id,
-a Claude/Codex conversation id bound to a deck session, a deck title or id
-prefix, or a conversation id whose file exists under any Claude config dir or
-Codex home. Only then is the index asked (`#n`, card ids, other harnesses).
-The native file is parsed directly, so a session whose source the sweep
-deferred answers at once. Claude Code and Codex are read and streamed
-directly; Pi, Gemini, OpenCode and Hermes come from the index as v1 turns
-mapped onto rows (`source: "index"`) and are streamed with `--v1`.
+a Claude, Codex or Pi conversation id bound to a deck session, a deck title
+or id prefix, or a conversation id whose file exists under any Claude config
+dir or Codex home. Only then is the index asked (`#n`, card ids, other
+harnesses). The native file is parsed directly, so a session whose source the
+sweep deferred answers at once. Claude Code, Codex and Pi are read and
+streamed directly; Gemini, OpenCode and Hermes come from the index as v1
+turns mapped onto rows (`source: "index"`) and are streamed with `--v1`.
+
+A Pi deck session is read from its exact session document: the saved Pi
+session id and path, or the single session file in its own
+`~/.pi/agent-deck/<id>` directory. With several files and no saved identity
+(after `/new` or `/resume` in Pi), or on a remote, the CLI asks the index
+instead, and says which when the index has nothing either. Rows follow the
+file in order, so a Pi session branched with `/tree` shows every branch; a
+`branch_summary` record becomes a `system` row titled "Branch summary" where
+the branch was left. Following only the active branch is not done yet.
 
 Timeline:
 
@@ -115,7 +124,7 @@ has no `before_cursor`, so paging stops. A `through_cursor` can also bootstrap
 an older-history read from that snapshot's end. Appended records do not move
 the historical snapshot; rewritten, truncated or moved sources require resync.
 `--before` requires a positive limit, cannot combine with `--since`, `--tail`,
-`--agent` or `--v1`, and is supported for directly read Claude/Codex transcripts.
+`--agent` or `--v1`, and is supported for directly read Claude, Codex and Pi transcripts.
 Older cores reject the unknown option, allowing clients to fall back to tail
 pagination. Pages transmit only the requested rows. The native parser still
 uses growing windows through the snapshot end to preserve later tool results
@@ -124,6 +133,34 @@ a second pass retains bodies only for the requested page. Memory still grows
 with the number of identities in the window, and backward paging still reparses
 the previously shown suffix. Attached sub-agent children retain their existing
 behavior and can independently contain a large transcript.
+
+### Over HTTP (`agent-deck web`)
+
+`GET /api/sessions/{id}/timeline` answers the same rows v2 object for a deck
+session id, so a web or other HTTP client reads what `recall timeline <id>
+--json` prints. The query parameters are the CLI's flags: `tail`, `limit`,
+`since`, `before` (with `limit`) and `agent`, with the same rules. It reads
+the session's live Claude Code, Codex or Pi transcript and never touches the
+index. The route follows the web server's token like every other `/api`
+route and needs `[recall] enabled = true` like the CLI.
+
+Without `tail` or `since` the route reads the whole transcript on every
+request, as the CLI does. A web client should always send one of them: `tail`
+for the first screen, then `since` with the returned `through_cursor`.
+
+The pane `status` the CLI adds is left out: the web menu stream already
+carries session status. A cursor names its transcript, so one issued for
+another file is refused rather than read.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 200 | | the rows v2 object; `turns` is `[]` when nothing changed since the cursor |
+| 400 | `INVALID_REQUEST` | a parameter is not an integer or is negative, the combination is refused (`before` without `limit`), `agent` is not a sub-agent id, or `agent` is set on a session that is not Claude Code |
+| 404 | `NOT_FOUND` | no such session, its transcript does not exist on this machine yet, or no sub-agent sidechain matches `agent` |
+| 409 | `RESYNC_REQUIRED` | the cursor is malformed or no longer describes the transcript (rewritten, moved, or not this session's); reload without it |
+| 500 | `INTERNAL_ERROR` | the session data or the transcript could not be read |
+| 501 | `NOT_IMPLEMENTED` | the session's tool is not Claude Code, Codex or Pi; the CLI falls back to the index for those, the route does not |
+| 503 | `RECALL_DISABLED` | `[recall] enabled` is false |
 
 Row:
 

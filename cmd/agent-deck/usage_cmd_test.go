@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,7 @@ func runUsageCLIEnv(t *testing.T, home string, stdin string, env []string, args 
 		"XDG_STATE_HOME="+filepath.Join(home, ".local", "state"),
 		"AGENTDECK_PROFILE="+usageHelperProfile,
 		"CLAUDE_CONFIG_DIR=",
+		"CODEX_HOME=",
 		"ANTHROPIC_BASE_URL=",
 		"ANTHROPIC_AUTH_TOKEN="+usageSentinelToken,
 	)
@@ -310,4 +312,170 @@ func TestUsageIsRegisteredAndDispatched(t *testing.T) {
 	// extractProfileFlag stops honoring the global -p at the first registry
 	// token, so registration is what makes `agent-deck -p work usage` parse.
 	assert.True(t, commandRegistry["usage"])
+}
+
+// writeCodexRollout seeds a Codex transcript carrying one rate_limits record,
+// the shape Codex writes after every turn.
+func writeCodexRollout(t *testing.T, home string, usedPercent float64) {
+	t.Helper()
+	writeCodexRolloutAt(t, home, usedPercent, time.Now())
+}
+
+// writeCodexRolloutAt dates the record, which is what dates the reading: a
+// transcript written just now can still hold an hours-old measurement.
+func writeCodexRolloutAt(t *testing.T, home string, usedPercent float64, at time.Time) {
+	t.Helper()
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "10", "26")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	record := `{"timestamp":"` + at.UTC().Format(time.RFC3339) + `","type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"limit_id":"codex","primary":{"used_percent":` +
+		strconv.FormatFloat(usedPercent, 'f', 1, 64) +
+		`,"window_minutes":300,"resets_at":` + strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10) +
+		`},"secondary":{"used_percent":2.0,"window_minutes":10080},"plan_type":"plus"}}}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "rollout-test.jsonl"), []byte(record+"\n"), 0o644))
+}
+
+func TestUsageReadsCodexRolloutAndCachesIt(t *testing.T) {
+	home := t.TempDir()
+	writeCodexRollout(t, home, 13.5)
+
+	result := runUsageCLI(t, home, "", "usage", "--json")
+	require.Equal(t, 0, result.exitCode, result.stderr)
+
+	var report quota.Report
+	require.NoError(t, json.Unmarshal([]byte(result.stdout), &report))
+	var codex *quota.Snapshot
+	for i := range report.Providers {
+		if report.Providers[i].ID == quota.ProviderCodex {
+			codex = &report.Providers[i]
+		}
+	}
+	require.NotNil(t, codex, "report carries no codex provider: %s", result.stdout)
+	assert.Equal(t, "Codex", codex.Label)
+	assert.Equal(t, "plus", codex.Plan)
+	require.Len(t, codex.Windows, 2)
+	assert.Equal(t, 13.5, codex.Windows[0].UsedPercentage)
+	assert.False(t, codex.Stale)
+
+	// The reading is cached like any other provider, so the next render does
+	// not walk the session tree again.
+	cached := filepath.Join(home, ".cache", "agent-deck", "quota", usageHelperProfile, "codex.json")
+	assert.FileExists(t, cached)
+}
+
+func TestUsageWithoutCodexHomeReportsNoCodex(t *testing.T) {
+	home := t.TempDir()
+	seedSnapshot(t, home, usageHelperProfile, freshClaudeSnapshot())
+
+	result := runUsageCLI(t, home, "", "usage", "--json")
+	require.Equal(t, 0, result.exitCode, result.stderr)
+	assert.NotContains(t, result.stdout, quota.ProviderCodex)
+}
+
+func TestUsageHonorsProfileCodexConfigDir(t *testing.T) {
+	home := t.TempDir()
+	// The rollout lives outside ~/.codex, reachable only through the
+	// profile's own [profiles.<name>.codex] config_dir.
+	elsewhere := t.TempDir()
+	writeCodexRollout(t, elsewhere, 44.0)
+	configDir := filepath.Join(home, ".agent-deck")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	config := "[profiles." + usageHelperProfile + ".codex]\n  config_dir = \"" + filepath.Join(elsewhere, ".codex") + "\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(config), 0o600))
+
+	result := runUsageCLI(t, home, "", "usage", "--json")
+	require.Equal(t, 0, result.exitCode, result.stderr)
+	assert.Contains(t, result.stdout, `"used_percentage": 44`)
+}
+
+func TestUsageMarksAnOldCodexReadingStale(t *testing.T) {
+	home := t.TempDir()
+	// The transcript is new; the reading in it is not. Codex only writes a
+	// reading when it makes a request, so an idle account's numbers age
+	// exactly like Claude's pushed snapshot and must say so.
+	writeCodexRolloutAt(t, home, 13.5, time.Now().Add(-2*time.Hour))
+
+	result := runUsageCLI(t, home, "", "usage", "--json")
+	require.Equal(t, 0, result.exitCode, result.stderr)
+
+	var report quota.Report
+	require.NoError(t, json.Unmarshal([]byte(result.stdout), &report))
+	require.Len(t, report.Providers, 1)
+	assert.Equal(t, quota.ProviderCodex, report.Providers[0].ID)
+	assert.True(t, report.Providers[0].Stale, "a two-hour-old reading is not fresh")
+}
+
+func TestUsageHonorsGlobalCodexConfigDir(t *testing.T) {
+	home := t.TempDir()
+	elsewhere := t.TempDir()
+	writeCodexRollout(t, elsewhere, 44.0)
+	configDir := filepath.Join(home, ".agent-deck")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	config := "[codex]\n  config_dir = \"" + filepath.Join(elsewhere, ".codex") + "\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(config), 0o600))
+
+	result := runUsageCLI(t, home, "", "usage", "--json")
+	require.Equal(t, 0, result.exitCode, result.stderr)
+	assert.Contains(t, result.stdout, `"used_percentage": 44`)
+}
+
+func TestUsageKeepsCachedCodexWhenNothingIsReadable(t *testing.T) {
+	home := t.TempDir()
+	// Cached numbers from a Codex that has since been uninstalled: the last
+	// known reading is worth more than a provider that silently vanishes.
+	resets := time.Now().Add(time.Hour).Unix()
+	seedSnapshot(t, home, usageHelperProfile, quota.Snapshot{
+		ID:        quota.ProviderCodex,
+		Label:     "Codex",
+		Windows:   []quota.Window{{Kind: quota.WindowFiveHour, Label: "5h", UsedPercentage: 77, ResetsAt: &resets}},
+		UpdatedAt: time.Now().Add(-2 * time.Hour).Unix(),
+	})
+
+	result := runUsageCLI(t, home, "", "usage", "--json")
+	require.Equal(t, 0, result.exitCode, result.stderr)
+
+	var report quota.Report
+	require.NoError(t, json.Unmarshal([]byte(result.stdout), &report))
+	require.Len(t, report.Providers, 1)
+	assert.Equal(t, 77.0, report.Providers[0].Windows[0].UsedPercentage)
+	assert.True(t, report.Providers[0].Stale)
+	assert.Empty(t, report.Providers[0].Error, "an uninstalled Codex is not a failure")
+}
+
+func TestUsageRefreshBringsTheCodexReadForward(t *testing.T) {
+	home := t.TempDir()
+	writeCodexRollout(t, home, 44.0)
+	seedSnapshot(t, home, usageHelperProfile, quota.Snapshot{
+		ID:        quota.ProviderCodex,
+		Label:     "Codex",
+		Windows:   []quota.Window{{Kind: quota.WindowFiveHour, Label: "5h", UsedPercentage: 1}},
+		UpdatedAt: time.Now().Unix(),
+	})
+
+	// A fresh cache is served as-is: the transcript is not walked on every
+	// invocation.
+	cached := runUsageCLI(t, home, "", "usage", "--json")
+	require.Equal(t, 0, cached.exitCode, cached.stderr)
+	assert.Contains(t, cached.stdout, `"used_percentage": 1`)
+
+	refreshed := runUsageCLI(t, home, "", "usage", "--json", "--refresh")
+	require.Equal(t, 0, refreshed.exitCode, refreshed.stderr)
+	assert.Contains(t, refreshed.stdout, `"used_percentage": 44`)
+}
+
+func TestUsageHonorsCodexHomeEnv(t *testing.T) {
+	home := t.TempDir()
+	elsewhere := t.TempDir()
+	writeCodexRollout(t, elsewhere, 44.0)
+	configDir := filepath.Join(home, ".agent-deck")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	// Both set: CODEX_HOME wins, because that is the home the sessions
+	// themselves run against (internal/session's resolver), and quota reported
+	// against a different account's transcripts is worse than none.
+	config := "[codex]\n  config_dir = \"" + filepath.Join(home, "unused-codex") + "\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(config), 0o600))
+
+	env := []string{"CODEX_HOME=" + filepath.Join(elsewhere, ".codex")}
+	result := runUsageCLIEnv(t, home, "", env, "usage", "--json")
+	require.Equal(t, 0, result.exitCode, result.stderr)
+	assert.Contains(t, result.stdout, `"used_percentage": 44`)
 }
