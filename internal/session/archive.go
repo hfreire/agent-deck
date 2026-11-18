@@ -17,6 +17,21 @@ func (i *Instance) IsArchived() bool {
 	return !i.ArchivedAt.IsZero()
 }
 
+// StatusFrozenByArchive reports whether a status poll of inst can be skipped:
+// it is archived and settled. An archived session whose tmux was already gone
+// when it was archived never went through Kill() and may still claim a live
+// status; it stays polled until it settles.
+func (i *Instance) StatusFrozenByArchive() bool {
+	if !i.IsArchived() {
+		return false
+	}
+	switch i.GetStatusThreadSafe() {
+	case StatusRunning, StatusWaiting, StatusIdle, StatusStarting:
+		return false
+	}
+	return true
+}
+
 // ArchivedAtThreadSafe returns ArchivedAt, read under the archive lock.
 func (i *Instance) ArchivedAtThreadSafe() time.Time {
 	i.archiveMu.RLock()
@@ -30,6 +45,21 @@ func (i *Instance) SetArchivedAtThreadSafe(t time.Time) {
 	i.archiveMu.Lock()
 	i.ArchivedAt = t
 	i.archiveMu.Unlock()
+}
+
+// MarkStopped records a deliberate stop for a session whose pane is already
+// gone, so there is nothing for Kill to tear down. Archiving such a session
+// would otherwise keep whatever status the dead pane left behind (usually
+// error), and every status count would report the archive as a crash.
+//
+// Like Kill, it releases any auth hold: this is a deliberate stop, so a later
+// restart is a user act, not automation the hold should block.
+func (i *Instance) MarkStopped() {
+	i.mu.Lock()
+	i.Status = StatusStopped
+	i.stopRevision++
+	i.clearAuthHoldLocked()
+	i.mu.Unlock()
 }
 
 // FilterInstancesByArchive returns instances whose archive state matches archived.
